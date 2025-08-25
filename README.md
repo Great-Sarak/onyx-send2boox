@@ -3,6 +3,13 @@
 Python code to handle files Onyx Boox e-book reader via Send2Boox service.
 
 
+# Status
+
+This project is no longer maintained.
+Firmware on my Onyx Boox Nova2 e-reader is several versions older than firmware on
+current Onyx e-readers so I do not have a way to check is my code working with current
+devices.
+
 # Usage
 
 ## How to get token
