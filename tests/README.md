@@ -18,7 +18,16 @@ pytest -m live         # live-API integration tests (requires BOOX_RUN_LIVE_TEST
 pytest -m "not live"   # explicit unit-only when you have the env set
 ```
 
-Live tests are skipped by default (see Phase 0 [#3](https://github.com/Great-Sarak/onyx-send2boox/issues/3) for the gating logic, landing next).
+Live tests are skipped by default — landing logic in Phase 0 [#3](https://github.com/Great-Sarak/onyx-send2boox/issues/3). Tokens load from:
+
+1. `BOOX_TOKEN` env var (preferred for CI / one-off).
+2. `BOOX_SECRETS_FILE` env var pointing at an env-style file with a `BOOX_TOKEN=...` line (useful for the shared workspace `secrets/boox.env`).
+3. `<repo-root>/secrets/boox.env` (per-repo, gitignored).
+
+Example:
+```bash
+BOOX_RUN_LIVE_TESTS=1 BOOX_SECRETS_FILE=/path/to/secrets/boox.env pytest -m live
+```
 
 ## Layout
 
