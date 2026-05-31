@@ -8,9 +8,13 @@
   real config.ini.
 - ``unit_client`` (#4): pre-constructed ``Boox(skip_init=True)`` with the
   test token already in place, for tests that exercise ``api_call`` directly.
-- ``live_token`` (#3): session-scoped token loader for ``@pytest.mark.live``
-  tests. Loaded from one of (in priority order): the ``BOOX_TOKEN`` env var,
-  the file at ``BOOX_SECRETS_FILE``, or ``<repo-root>/secrets/boox.env``.
+- ``live_token`` (#3): session-scoped Bearer-JWT loader for
+  ``@pytest.mark.live`` tests. Loaded from one of (in priority order): the
+  ``BOOX_TOKEN`` env var, the file at ``BOOX_SECRETS_FILE``, or
+  ``<repo-root>/secrets/boox.env``.
+- ``live_sync_token`` (#3): same three-source pattern for ``BOOX_SYNC_TOKEN``
+  (the SyncGatewaySession cookie value). Required for any live test hitting
+  ``/neocloud/*`` endpoints since those reject Bearer auth.
 - ``pytest_collection_modifyitems`` (#3): skips ``@pytest.mark.live`` tests
   unless ``BOOX_RUN_LIVE_TESTS`` is set in the env.
 """
@@ -102,8 +106,8 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_live)
 
 
-def _load_token_from_env_file(path: Path) -> str | None:
-    """Parse a simple ``KEY=VALUE`` env file and return BOOX_TOKEN if present.
+def _load_var_from_env_file(path: Path, var_name: str) -> str | None:
+    """Parse a simple ``KEY=VALUE`` env file and return ``var_name`` if present.
 
     Tolerant of leading ``export`` keywords and single- or double-quoted
     values, matching the convention used in our shared ``secrets/boox.env``.
@@ -116,7 +120,7 @@ def _load_token_from_env_file(path: Path) -> str | None:
             continue
         if line.startswith("export "):
             line = line[len("export ") :].strip()
-        if not line.startswith("BOOX_TOKEN"):
+        if not line.startswith(var_name):
             continue
         _, _, value = line.partition("=")
         value = value.strip().strip('"').strip("'")
@@ -125,38 +129,66 @@ def _load_token_from_env_file(path: Path) -> str | None:
     return None
 
 
-@pytest.fixture(scope="session")
-def live_token():
-    """Load a Boox JWT for live tests, with documented source priority.
+def _load_live_secret(env_var: str) -> str | None:
+    """Resolve a live-test secret from the three documented sources.
 
     Sources tried in order:
 
-    1. ``BOOX_TOKEN`` env var (preferred for CI / one-off runs).
+    1. ``<env_var>`` env var (preferred for CI / one-off runs).
     2. ``BOOX_SECRETS_FILE`` env var pointing at an env-style file containing
-       a ``BOOX_TOKEN=...`` line (useful for pointing at the shared
-       workspace ``secrets/boox.env``).
+       a ``<env_var>=...`` line (useful for pointing at the shared workspace
+       ``secrets/boox.env``).
     3. ``<repo-root>/secrets/boox.env`` (per-repo convention; gitignored).
 
-    Skips the test if none of the above produce a token, so live runs without
-    auth fail fast and informatively.
+    Returns None if the secret cannot be located.
     """
-    token = os.environ.get("BOOX_TOKEN")
-    if token:
-        return token
+    value = os.environ.get(env_var)
+    if value:
+        return value
 
     explicit_file = os.environ.get("BOOX_SECRETS_FILE")
     if explicit_file:
-        token = _load_token_from_env_file(Path(explicit_file))
-        if token:
-            return token
+        value = _load_var_from_env_file(Path(explicit_file), env_var)
+        if value:
+            return value
 
     repo_root = Path(__file__).resolve().parent.parent
-    token = _load_token_from_env_file(repo_root / "secrets" / "boox.env")
-    if token:
-        return token
+    value = _load_var_from_env_file(repo_root / "secrets" / "boox.env", env_var)
+    if value:
+        return value
 
-    pytest.skip(
-        "No Boox token available. Set BOOX_TOKEN, point BOOX_SECRETS_FILE at "
-        "an env file with a BOOX_TOKEN= line, or populate "
-        "<repo-root>/secrets/boox.env."
-    )
+    return None
+
+
+@pytest.fixture(scope="session")
+def live_token():
+    """Load the Bearer JWT for live tests."""
+    token = _load_live_secret("BOOX_TOKEN")
+    if not token:
+        pytest.skip(
+            "No Boox JWT available. Set BOOX_TOKEN, point BOOX_SECRETS_FILE "
+            "at an env file with a BOOX_TOKEN= line, or populate "
+            "<repo-root>/secrets/boox.env."
+        )
+    return token
+
+
+@pytest.fixture(scope="session")
+def live_sync_token():
+    """Load the SyncGatewaySession cookie value for live tests against
+    ``/neocloud/*`` endpoints.
+
+    Same three-source priority as ``live_token`` (env, ``BOOX_SECRETS_FILE``,
+    repo ``secrets/boox.env``) but reads ``BOOX_SYNC_TOKEN``. Skips the test
+    if missing — sync-touching live tests can't proceed without it because
+    ``/neocloud/*`` rejects Bearer auth.
+    """
+    value = _load_live_secret("BOOX_SYNC_TOKEN")
+    if not value:
+        pytest.skip(
+            "No Sync Gateway session available. Set BOOX_SYNC_TOKEN, point "
+            "BOOX_SECRETS_FILE at an env file with a BOOX_SYNC_TOKEN= line, "
+            "or populate <repo-root>/secrets/boox.env. Required for live "
+            "tests that hit /neocloud/* endpoints."
+        )
+    return value

@@ -18,16 +18,25 @@ pytest -m live         # live-API integration tests (requires BOOX_RUN_LIVE_TEST
 pytest -m "not live"   # explicit unit-only when you have the env set
 ```
 
-Live tests are skipped by default — landing logic in Phase 0 [#3](https://github.com/Great-Sarak/onyx-send2boox/issues/3). Tokens load from:
+Live tests are skipped by default — landing logic in Phase 0 [#3](https://github.com/Great-Sarak/onyx-send2boox/issues/3). Two secrets are loadable, each with the same three-source priority:
 
-1. `BOOX_TOKEN` env var (preferred for CI / one-off).
-2. `BOOX_SECRETS_FILE` env var pointing at an env-style file with a `BOOX_TOKEN=...` line (useful for the shared workspace `secrets/boox.env`).
+| Fixture | Variable | Purpose |
+| --- | --- | --- |
+| `live_token` | `BOOX_TOKEN` | Bearer JWT for `/api/1/*` |
+| `live_sync_token` | `BOOX_SYNC_TOKEN` | SyncGatewaySession cookie for `/neocloud/*` |
+
+Source priority (each variable independently):
+
+1. Env var of the same name (preferred for CI / one-off).
+2. `BOOX_SECRETS_FILE` env var pointing at an env-style file containing a `<VAR>=...` line (useful for the shared workspace `secrets/boox.env`).
 3. `<repo-root>/secrets/boox.env` (per-repo, gitignored).
 
 Example:
 ```bash
 BOOX_RUN_LIVE_TESTS=1 BOOX_SECRETS_FILE=/path/to/secrets/boox.env pytest -m live
 ```
+
+Tests using only `live_token` (e.g., `users/me`) skip cleanly if only the JWT is available. Tests using `live_sync_token` (`/neocloud/*` calls) skip if the cookie is missing.
 
 ## Layout
 
