@@ -84,13 +84,30 @@ class Boox:
 
         return r.json()
 
-    def list_files(self, limit=24, offset=0):
-        # I would expect LC_ALL to be set but it may not be
-        locale.setlocale(locale.LC_ALL, locale.getlocale()[0])
-        files = self.api_call('push/message',
-                              params={"where": '{' f'"limit": {limit}, '
-                                      f'"offset": {offset}, '
-                                      '"parent": 0}'})['list']
+    def list_files(self, limit=24, offset=0, source_type=None, parent=0):
+        """Fetch a BooxDrop listing; print human-readable + return parsed list.
+
+        Phase 0 #6 fixes:
+        - Drops the ``locale.setlocale(locale.LC_ALL, locale.getlocale()[0])``
+          call that crashed in any env where ``locale.getlocale()`` returned
+          ``(None, None)`` (minimal containers, distros without LC_ALL set).
+        - Replaces the ``:>10n`` locale-dependent thousands separator with
+          ``:>10,`` (Python builtin — works in any locale).
+        - Switches the ``where`` filter from manual string concat to
+          ``json.dumps`` (encodes correctly and pulls in ``source_type``
+          / ``parent`` cleanly).
+        - Accepts ``source_type`` so callers can filter to screensavers
+          (``source_type=100``) or future categories.
+        - Returns the parsed list so tests / callers can inspect results.
+        """
+        where = {"limit": limit, "offset": offset, "parent": parent}
+        if source_type is not None:
+            where["sourceType"] = source_type
+
+        files = self.api_call(
+            'push/message',
+            params={"where": json.dumps(where, separators=(',', ':'))},
+        )['list']
 
         print("        ID               |    Size    | Name")
         print("-------------------------|------------|"
@@ -98,10 +115,11 @@ class Boox:
 
         for entry in files:
             data = entry['data']['args']
-            format = data['formats'][0]
-            print(f"{data['_id']} | "
-                  f"{int(data['storage'][format]['oss']['size']):>10n} | "
-                  f"{data['name']}")
+            fmt = data['formats'][0]
+            size = int(data['storage'][fmt]['oss']['size'])
+            print(f"{data['_id']} | {size:>10,} | {data['name']}")
+
+        return files
 
     def send_file(self, filename):
         stss_data = self.api_call('config/stss')['data']
