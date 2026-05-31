@@ -106,8 +106,15 @@ class Boox:
 
         bucket = oss2.Bucket(auth, self.endpoint, self.bucket_name)
 
-        tmp, extension = os.path.splitext(filename)
-        remotename = f'{self.userid}/push/{uuid.uuid4()}.{extension}'
+        _tmp, extension_with_dot = os.path.splitext(filename)
+        # Phase 0 #5: derive resourceType from extension (was hardcoded "txt"
+        # which caused all uploads to be classified as text in the reader).
+        # Fall back to "bin" for dotless files. The OSS-key double-dot fix
+        # is targeted separately in #7.
+        resource_type = (
+            extension_with_dot.lstrip('.').lower() if extension_with_dot else 'bin'
+        )
+        remotename = f'{self.userid}/push/{uuid.uuid4()}.{extension_with_dot}'
 
         token_headers = {'x-oss-security-token': self.security_token}
 
@@ -127,7 +134,7 @@ class Boox:
                               'parent': None,
                               'resourceDisplayName': filename,
                               "resourceKey": remotename,
-                              "resourceType": "txt",
+                              "resourceType": resource_type,
                               "title": filename}
                       })
 
