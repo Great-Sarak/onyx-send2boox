@@ -28,7 +28,9 @@ import boox
 # narrowly focused on behavior, not boilerplate.
 TEST_CLOUD = "push.boox.com"
 TEST_TOKEN = "test-token-fixture"  # pragma: allowlist secret
+TEST_SYNC_TOKEN = "test-sync-token-fixture"  # pragma: allowlist secret
 TEST_API_BASE = f"https://{TEST_CLOUD}/api/1"
+TEST_NEOCLOUD_BASE = f"https://{TEST_CLOUD}/neocloud"
 
 
 # --------------------------- HTTP mocking (#2) -----------------------------
@@ -61,7 +63,13 @@ def boox_config():
     constructor sees no behavioral difference between this and the on-disk
     file path.
     """
-    return {"default": {"cloud": TEST_CLOUD, "token": TEST_TOKEN}}
+    return {
+        "default": {
+            "cloud": TEST_CLOUD,
+            "token": TEST_TOKEN,
+            "sync_token": TEST_SYNC_TOKEN,
+        }
+    }
 
 
 @pytest.fixture

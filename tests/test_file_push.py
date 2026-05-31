@@ -1,30 +1,35 @@
 """Unit test suite — file push to BooxDrop.
 
-Covers the ``send_file`` end-to-end flow: ``config/stss`` (OSS credential
-fetch), OSS upload (mocked), and ``push/saveAndPush`` (notification).
+Covers the ``send_file`` end-to-end flow against the web-UI-confirmed
+behavior (2026-05-31 BooxDrop upload HAR):
 
-Catches three known bugs (per ``gian-didom/onyx-send2boox`` README):
-- **resourceType default**: hrw hardcodes ``"txt"`` regardless of the file's
-  extension. Test asserts derivation from extension; fix lands in this issue.
-- **OSS multipart STS**: ``oss2.resumable_upload`` needs ``ListParts`` perms
-  that the STS token doesn't grant; test asserts ``put_object`` usage and is
-  marked ``xfail`` — the fix is part of the Phase 1 files-module refactor (#32).
-- **NaN:NaN timestamp**: the reader filters out files lacking proper
-  timestamps. The fix requires a follow-up ``_bulk_docs`` push to the
-  ``<user_uid>-MESSAGE`` channel (per gian-didom); test is marked ``xfail`` —
-  proper home is the Phase 4 sync work (#34) wired into the files module (#32).
+1. ``config/stss`` — fetch OSS STS credentials (Bearer JWT auth).
+2. OSS upload via ``oss2.resumable_upload`` (multipart internally — the
+   web UI also uses multipart; gian-didom's "STS can't multipart" claim
+   isn't supported by the actual web-UI behavior, so no put_object/
+   resumable distinction is asserted here).
+3. ``POST /neocloud/_bulk_docs`` to ``<user_uid>-MESSAGE`` channel,
+   carrying ``createdAt`` + ``updatedAt`` as epoch-ms ints derived from
+   the source file's mtime. Auth via SyncGatewaySession cookie. This
+   step fixes the NaN-timestamp bug; without it the reader filters the
+   file out.
+4. ``POST /api/1/push/saveAndPush`` — register with Boox cloud (Bearer
+   JWT). ``resourceType`` derived from the file extension (fixes hrw's
+   hardcoded ``"txt"``).
 
-Added by #5 (Unit test suite — file push to BooxDrop).
+Added by #5 (Unit test suite — file push to BooxDrop). Two known bugs
+fixed inline (resourceType derivation, bulk_docs registration with
+proper timestamps). One open question carried forward: the OSS key
+double-dot format is its own targeted edge case in #7.
 """
 
 import json
-import re
 import time
 
 import pytest
 
 import boox
-from .conftest import TEST_API_BASE
+from .conftest import TEST_API_BASE, TEST_NEOCLOUD_BASE, TEST_SYNC_TOKEN
 
 
 _STSS_DATA = {
@@ -61,10 +66,15 @@ def oss_mocks(mocker):
 
 
 def _stub_stss_and_save(mock_http):
-    """Register the two HTTP calls send_file always makes."""
+    """Register the HTTP calls send_file always makes: STS, bulk_docs, save."""
     mock_http.get(
         f"{TEST_API_BASE}/config/stss",
         json={"result_code": 0, "data": _STSS_DATA},
+    )
+    mock_http.post(
+        f"{TEST_NEOCLOUD_BASE}/_bulk_docs",
+        json=[{"id": "doc-id", "rev": "1-fixturerev"}],
+        status=201,
     )
     mock_http.post(
         f"{TEST_API_BASE}/push/saveAndPush",
@@ -183,71 +193,78 @@ def test_send_file_fetches_sts_credentials(
     assert len(stss_calls) == 1, "send_file should fetch STS credentials once"
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Multipart-STS fix: switch from oss2.resumable_upload to single-shot "
-        "bucket.put_object. resumable_upload requires ListParts perms that "
-        "the STS token doesn't grant; bug surfaces for files >10MB (oss2's "
-        "default multipart threshold). gian-didom's README claims this fix "
-        "but their code still calls resumable_upload. Lands properly with "
-        "the Phase 1 files-module refactor (#32)."
-    ),
-    strict=True,
-)
-def test_send_file_prefers_put_object_over_resumable_upload(
+# --------------------------- Timestamp / reader visibility -----------------
+#
+# The web-UI BooxDrop HAR (2026-05-31) confirmed: a complete push does a
+# POST /neocloud/_bulk_docs to <user_uid>-MESSAGE channel BEFORE
+# push/saveAndPush. Auth is via SyncGatewaySession cookie (NOT Bearer).
+# The doc carries createdAt + updatedAt as epoch-ms ints; without this,
+# push/saveAndPush registers the file but the reader filters it out as
+# NaN-timestamped.
+#
+# Also from that HAR: the web UI uses multipart upload (init+part+complete)
+# against the STS token without issue. gian-didom's README claim about
+# "STS can't multipart" isn't supported by the actual web-UI behavior, so
+# no put_object-vs-resumable test here.
+
+
+def test_send_file_posts_bulk_docs_before_saveAndPush(
     mock_http, push_ready_client, oss_mocks, tmp_path
 ):
-    """OSS upload should be single-shot, not multipart-resumable."""
-    f = tmp_path / "x.pdf"
+    """A complete push hits /neocloud/_bulk_docs strictly before saveAndPush."""
+    f = tmp_path / "story.pdf"
     f.write_bytes(b"%PDF")
     _stub_stss_and_save(mock_http)
 
     push_ready_client.send_file(str(f))
 
-    assert oss_mocks["bucket"].put_object.called, "put_object not called"
-    assert not oss_mocks["resumable_upload"].called, "resumable_upload still in use"
+    urls = [c.request.url for c in mock_http.calls]
+    bulk_idx = next(i for i, u in enumerate(urls) if "neocloud/_bulk_docs" in u)
+    save_idx = next(i for i, u in enumerate(urls) if "saveAndPush" in u)
+    assert bulk_idx < save_idx, f"Expected _bulk_docs before saveAndPush; got {urls}"
 
 
-# --------------------------- Timestamp / reader visibility -----------------
-
-
-@pytest.mark.xfail(
-    reason=(
-        "NaN-timestamp fix: per gian-didom, a successful push needs a "
-        "follow-up POST /neocloud/_bulk_docs to the <user_uid>-MESSAGE "
-        "channel with createdAt/updatedAt set to epoch-ms. The reader "
-        "filters out files lacking valid timestamps. This is a substantial "
-        "addition — requires the sync-gateway primitives from Phase 4 #34 "
-        "wired into the files module (#32). Tracked there; do not patch "
-        "here on top of hrw's flat boox.py."
-    ),
-    strict=True,
-)
-def test_send_file_propagates_valid_timestamp_via_bulk_docs(
+def test_send_file_bulk_docs_carries_valid_timestamps(
     mock_http, push_ready_client, oss_mocks, tmp_path
 ):
-    """A complete push ends with a _bulk_docs PUT setting valid timestamps."""
-    f = tmp_path / "x.pdf"
+    """createdAt + updatedAt land as epoch-ms ints — the NaN fix."""
+    f = tmp_path / "story.pdf"
     f.write_bytes(b"%PDF")
     _stub_stss_and_save(mock_http)
-    # Pre-register the (expected) follow-up bulk_docs call.
-    mock_http.post(
-        f"https://{boox.read_config.__defaults__[0]}/neocloud/_bulk_docs",
-        json=[{"id": "doc-id", "rev": "2-fixture"}],
-    )
 
     push_ready_client.send_file(str(f))
 
     bulk_calls = [c for c in mock_http.calls if "neocloud/_bulk_docs" in c.request.url]
-    assert bulk_calls, "send_file should follow saveAndPush with _bulk_docs"
-    bulk_body = json.loads(bulk_calls[0].request.body)
-    doc = bulk_body["docs"][0]
-    assert isinstance(doc["createdAt"], int), "createdAt must be epoch ms int"
-    assert isinstance(doc["updatedAt"], int), "updatedAt must be epoch ms int"
+    assert bulk_calls
+    doc = json.loads(bulk_calls[0].request.body)["docs"][0]
+    assert isinstance(doc["createdAt"], int)
+    assert isinstance(doc["updatedAt"], int)
+    # Using file mtime, so close to "now" for a just-written tmp file.
     now_ms = time.time() * 1000
-    assert abs(doc["updatedAt"] - now_ms) < 5 * 60 * 1000, (
-        "updatedAt should be within a few minutes of push time"
+    assert abs(doc["updatedAt"] - now_ms) < 5 * 60 * 1000
+
+
+def test_send_file_bulk_docs_uses_message_channel_and_session_cookie(
+    mock_http, push_ready_client, oss_mocks, tmp_path
+):
+    """bulk_docs body uses ``<user_uid>-MESSAGE`` dbId + Sync Gateway cookie."""
+    f = tmp_path / "story.pdf"
+    f.write_bytes(b"%PDF")
+    _stub_stss_and_save(mock_http)
+
+    push_ready_client.send_file(str(f))
+
+    bulk_call = next(
+        c for c in mock_http.calls if "neocloud/_bulk_docs" in c.request.url
     )
+    doc = json.loads(bulk_call.request.body)["docs"][0]
+    assert doc["dbId"] == "user-uid-fixture-MESSAGE"
+    assert doc["contentType"] == "digital_content"
+    # Auth: SyncGatewaySession cookie, no Bearer header.
+    auth = bulk_call.request.headers.get("Authorization", "")
+    assert "Bearer" not in auth
+    cookie = bulk_call.request.headers.get("Cookie", "")
+    assert f"SyncGatewaySession={TEST_SYNC_TOKEN}" in cookie
 
 
 # --------------------------- Error paths -----------------------------------

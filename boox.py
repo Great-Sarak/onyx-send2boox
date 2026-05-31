@@ -5,6 +5,7 @@ import json
 import locale
 import logging
 import os
+import time
 import oss2
 import requests
 import uuid
@@ -29,6 +30,13 @@ class Boox:
             self.cloud = config['default']['cloud']
         else:
             self.cloud = 'eur.boox.com'
+
+        # Sync Gateway session cookie — used for /neocloud/* calls, set
+        # alongside the Bearer JWT from the same browser harvest. Optional
+        # so existing code paths that don't touch Sync Gateway keep working
+        # without it. Both ConfigParser SectionProxy and plain dict expose
+        # .get(); .get('sync_token') returns None when the key is absent.
+        self.sync_token = config['default'].get('sync_token') or None
 
         if skip_init:
             self.token = False
@@ -106,6 +114,7 @@ class Boox:
 
         bucket = oss2.Bucket(auth, self.endpoint, self.bucket_name)
 
+        filepath = filename  # preserve original path for stat() below
         _tmp, extension_with_dot = os.path.splitext(filename)
         # Phase 0 #5: derive resourceType from extension (was hardcoded "txt"
         # which caused all uploads to be classified as text in the reader).
@@ -114,14 +123,44 @@ class Boox:
         resource_type = (
             extension_with_dot.lstrip('.').lower() if extension_with_dot else 'bin'
         )
-        remotename = f'{self.userid}/push/{uuid.uuid4()}.{extension_with_dot}'
+        file_uuid = uuid.uuid4()
+        remotename = f'{self.userid}/push/{file_uuid}.{extension_with_dot}'
 
         token_headers = {'x-oss-security-token': self.security_token}
 
-        oss2.resumable_upload(bucket, remotename, filename,
+        oss2.resumable_upload(bucket, remotename, filepath,
                               headers=token_headers)
 
-        filename = os.path.basename(filename)
+        # File metadata for the bulk_docs registration below.
+        file_size = os.path.getsize(filepath)
+        # File mtime as both createdAt and updatedAt — better than the web UI's
+        # upload-time-only convention. The reader displays updatedAt as
+        # "modified"; falling back to current time only when mtime isn't
+        # available (e.g., streamed input — not our case here).
+        file_mtime_ms = int(os.path.getmtime(filepath) * 1000)
+        filename = os.path.basename(filepath)
+
+        # Phase 0 #5: register the file in the Sync Gateway MESSAGE channel
+        # so it carries valid timestamps. Without this, push/saveAndPush
+        # records the file but the reader filters it out as NaN-timestamped.
+        # Bearer JWT is *not* valid here — /neocloud/* uses the
+        # SyncGatewaySession cookie.
+        if self.sync_token:
+            self._push_message_doc(
+                doc_id=str(file_uuid).replace('-', ''),
+                filename=filename,
+                filesize=file_size,
+                remotename=remotename,
+                resource_type=resource_type,
+                created_at=file_mtime_ms,
+                updated_at=file_mtime_ms,
+            )
+        else:
+            logging.warning(
+                "send_file: sync_token unset — skipping bulk_docs registration; "
+                "file may appear with NaN timestamps in the reader. Add "
+                "BOOX_SYNC_TOKEN to your config to enable.",
+            )
 
         self.api_call('push/saveAndPush',
                       headers={
@@ -137,6 +176,62 @@ class Boox:
                               "resourceType": resource_type,
                               "title": filename}
                       })
+
+    def _push_message_doc(self, doc_id, filename, filesize, remotename,
+                          resource_type, created_at, updated_at):
+        """POST a digital_content doc to <user_uid>-MESSAGE via Sync Gateway.
+
+        Phase 0 #5: the web-UI upload flow does this *before* push/saveAndPush
+        to set valid createdAt/updatedAt timestamps. The reader filters out
+        files lacking these. Auth is via the SyncGatewaySession cookie, not
+        the Bearer JWT.
+        """
+        bulkdata = {
+            "docs": [{
+                "contentType": "digital_content",
+                "content": json.dumps({
+                    "_id": doc_id,
+                    "createdAt": created_at,
+                    "distributeChannel": "onyx",
+                    "formats": [resource_type],
+                    "guid": doc_id,
+                    "name": filename,
+                    "ownerId": self.userid,
+                    "size": filesize,
+                    "md5": "",
+                    "storage": {
+                        resource_type: {
+                            "oss": {
+                                "displayName": filename,
+                                "expires": 0,
+                                "key": remotename,
+                                "provider": "oss",
+                                "size": filesize,
+                            },
+                        },
+                    },
+                }),
+                "msgType": 2,
+                "dbId": f"{self.userid}-MESSAGE",
+                "user": self.userid,
+                "name": filename,
+                "size": filesize,
+                "uniqueId": doc_id,
+                "createdAt": created_at,
+                "updatedAt": updated_at,
+                "_id": doc_id,
+                "_rev": f"1-{uuid.uuid4().hex}",
+            }],
+            "new_edits": False,
+        }
+        url = f'https://{self.cloud}/neocloud/_bulk_docs'
+        headers = {
+            'Content-Type': 'application/json',
+            'Cookie': f'SyncGatewaySession={self.sync_token}',
+        }
+        r = requests.post(url, headers=headers, json=bulkdata)
+        r.raise_for_status()
+        return r.json()
 
     def request_verification_code(self, email):
         self.api_call('users/sendMobileCode', data={"mobi": email})
