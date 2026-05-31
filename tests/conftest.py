@@ -3,6 +3,11 @@
 - ``mock_http`` (#2): responses-based intercept layer for the ``requests``
   library. Tests register canned responses; the fixture object also captures
   outgoing requests so tests can assert URL/method/headers/body.
+- ``boox_config`` (#4): minimal config-dict factory for unit tests; produces
+  the same shape ``boox.Boox`` expects from configparser without needing a
+  real config.ini.
+- ``unit_client`` (#4): pre-constructed ``Boox(skip_init=True)`` with the
+  test token already in place, for tests that exercise ``api_call`` directly.
 - ``live_token`` (#3): session-scoped token loader for ``@pytest.mark.live``
   tests. Loaded from one of (in priority order): the ``BOOX_TOKEN`` env var,
   the file at ``BOOX_SECRETS_FILE``, or ``<repo-root>/secrets/boox.env``.
@@ -15,6 +20,15 @@ from pathlib import Path
 
 import pytest
 import responses
+
+import boox
+
+
+# Constants used across unit tests; keeping them here means tests stay
+# narrowly focused on behavior, not boilerplate.
+TEST_CLOUD = "push.boox.com"
+TEST_TOKEN = "test-token-fixture"  # pragma: allowlist secret
+TEST_API_BASE = f"https://{TEST_CLOUD}/api/1"
 
 
 # --------------------------- HTTP mocking (#2) -----------------------------
@@ -33,6 +47,33 @@ def mock_http():
     """
     with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
         yield rsps
+
+
+# --------------------------- Unit client config (#4) ----------------------
+
+
+@pytest.fixture
+def boox_config():
+    """Minimal config dict matching the shape ``Boox.__init__`` reads.
+
+    Returns the same nested mapping that ``configparser`` exposes when
+    parsing a real ``config.ini`` (``cfg['default']['cloud']`` etc), so the
+    constructor sees no behavioral difference between this and the on-disk
+    file path.
+    """
+    return {"default": {"cloud": TEST_CLOUD, "token": TEST_TOKEN}}
+
+
+@pytest.fixture
+def unit_client(boox_config):
+    """Pre-constructed ``Boox`` instance ready for unit testing.
+
+    Uses ``skip_init=True`` so the constructor doesn't make network calls;
+    the token is then set explicitly so ``api_call`` can authenticate.
+    """
+    client = boox.Boox(boox_config, skip_init=True)
+    client.token = boox_config["default"]["token"]
+    return client
 
 
 # --------------------------- Live-API gating (#3) --------------------------
