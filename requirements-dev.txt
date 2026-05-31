@@ -1,0 +1,6 @@
+# Dev dependencies — install with: pip install -r requirements-dev.txt
+# Runtime deps live in requirements.txt (oss2).
+
+pytest >= 8.0
+pytest-mock >= 3.10
+responses >= 0.24       # mocks the `requests` library — used by tests/conftest.py

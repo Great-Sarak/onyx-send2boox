@@ -1,0 +1,12 @@
+# Phase 0 (#1) lands minimal pyproject.toml carrying pytest configuration.
+# Phase 1 (#26) expands this with [build-system], [project] metadata,
+# hatchling build backend, and the boox CLI entry point.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+  "live: live-API integration test (requires BOOX_RUN_LIVE_TESTS=1 + valid token; skipped by default)",
+]
