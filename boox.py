@@ -142,7 +142,11 @@ class Boox:
             extension_with_dot.lstrip('.').lower() if extension_with_dot else 'bin'
         )
         file_uuid = uuid.uuid4()
-        remotename = f'{self.userid}/push/{file_uuid}.{extension_with_dot}'
+        # Phase 0 #7: OSS key format — extension_with_dot already includes
+        # the leading dot, so concatenate without a separator dot. The old
+        # f'.../{uuid}.{extension_with_dot}' produced `<uuid>..pdf` (two
+        # dots) which doesn't match what the web UI generates.
+        remotename = f'{self.userid}/push/{file_uuid}{extension_with_dot}'
 
         token_headers = {'x-oss-security-token': self.security_token}
 
