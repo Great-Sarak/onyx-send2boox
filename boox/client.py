@@ -26,6 +26,7 @@ from boox.auth import Auth
 from boox.errors import AuthError, OSSError
 from boox.files import FilesClient
 from boox.pushread import PushRead
+from boox.screensavers import ScreensaversClient
 from boox.subscriptions import SubscriptionsClient
 
 
@@ -52,11 +53,13 @@ class BooxClient:
         # Pattern A wiring (project decision #6, locked 2026-05-31): every
         # functional module surfaces as a subobject on the client. ``auth``
         # is the first; ``pushread`` follows (#29); ``subscriptions`` lands
-        # in Phase 2 (#30); ``files`` lands in Phase 2 (#32).
+        # in Phase 2 (#30); ``files`` lands in Phase 2 (#32);
+        # ``screensavers`` lands in Phase 2 (#33).
         self.auth = Auth(self)
         self.pushread = PushRead(self)
         self.subscriptions = SubscriptionsClient(self)
         self.files = FilesClient(self)
+        self.screensavers = ScreensaversClient(self)
 
         # Cached SyncGatewaySession (fallback only — Phase 1 #27 derives
         # this at runtime from the Bearer JWT). Read here so it's available
