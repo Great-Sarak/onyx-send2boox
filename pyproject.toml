@@ -1,6 +1,75 @@
-# Phase 0 (#1) lands minimal pyproject.toml carrying pytest configuration.
-# Phase 1 (#26) expands this with [build-system], [project] metadata,
-# hatchling build backend, and the boox CLI entry point.
+# Phase 1 (#26): expanded with [build-system] + [project] metadata,
+# hatchling build backend, and the ``boox`` CLI entry point. The Phase 0
+# pytest config below is preserved unchanged so the existing test suite
+# keeps discovering tests/ exactly as it did pre-move.
+
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "onyx-send2boox"
+description = "Python client for the Onyx Boox Send2Boox / cloud API."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dynamic = ["version"]
+authors = [
+  { name = "Marcin Juszkiewicz", email = "marcin@juszkiewicz.com.pl" },
+]
+maintainers = [
+  { name = "Great-Sarak" },
+]
+keywords = ["boox", "onyx", "ebook", "send2boox", "pushread"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Communications :: File Sharing",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+  "requests >= 2.28",
+  "oss2 >= 2.16",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest >= 8.0",
+  "pytest-mock >= 3.10",
+  "responses >= 0.24",
+  "build >= 1.0",
+]
+
+[project.scripts]
+boox = "boox.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Great-Sarak/onyx-send2boox"
+Repository = "https://github.com/Great-Sarak/onyx-send2boox"
+Issues = "https://github.com/Great-Sarak/onyx-send2boox/issues"
+
+[tool.hatch.version]
+path = "boox/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["boox"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "boox/",
+  "tests/",
+  "README.md",
+  "LICENSE",
+  "pyproject.toml",
+  "requirements.txt",
+  "requirements-dev.txt",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
