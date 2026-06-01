@@ -259,4 +259,27 @@ class Boox:
         self.api_call('users/sendMobileCode', data={"mobi": email})
 
     def delete_files(self, ids):
-        self.api_call('push/message/batchDelete', data={"ids": ids})
+        """Bulk-delete BooxDrop files by id.
+
+        ``ids`` is a list of file ``_id`` strings (e.g. from ``list_files()``
+        entries' ``data.args._id``). Returns the parsed ``api_call`` response.
+        """
+        return self.api_call('push/message/batchDelete', data={"ids": ids})
+
+    def delete_webpages(self, ids):
+        """Bulk-delete PushRead webpages, RSS subscriptions, or OPDS subs.
+
+        Endpoint is misleadingly named ``webpage/bat/del`` internally; per the
+        2026-05-31 finding it handles all three types uniformly (the
+        Sorotassu/Rukha capture saw RSS unsubscribe go through this endpoint
+        with no separate "unsubscribe" path).
+        """
+        return self.api_call('webpage/bat/del', data={"ids": ids})
+
+    def unsubscribe(self, sub_ids):
+        """Unsubscribe from RSS/OPDS feeds by user-sub record id.
+
+        Alias for ``delete_webpages`` — kept as a separate name so callers'
+        intent stays clear at call sites.
+        """
+        return self.delete_webpages(sub_ids)
