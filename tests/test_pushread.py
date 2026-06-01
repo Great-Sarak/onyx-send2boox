@@ -2,16 +2,13 @@
 
 Covers the Pattern A ``PushRead`` subobject wired onto ``BooxClient`` (#29).
 
-Endpoint coverage at first cut:
+Endpoint coverage:
 
 - ``GET  /api/1/webpage/list``    — HAR-confirmed.
+- ``POST /api/1/webpage/url``     — HAR-confirmed (pushread-add-har-2026-05-31.json).
 - ``POST /api/1/webpage/bat/del`` — HAR-confirmed.
-- ``POST /api/1/webpage/url``     — **HAR-missing.** Not implemented yet;
-  ``push_url`` will land in a follow-up commit once a webpage-add flow
-  is captured from push.boox.com. No tests in this file try to assert its
-  shape because the shape isn't known.
 
-Added by #29 (Phase 1 PushRead module — webpage CRUD, partial).
+Added by #29 (Phase 1 PushRead module — webpage CRUD).
 """
 
 import json
@@ -191,24 +188,85 @@ def test_delete_webpages_error_envelope(mock_http, unit_client):
     assert result["message"] == "boom"
 
 
-# --------------------------- push_url is intentionally absent --------------
+# --------------------------- push_url --------------------------------------
 
 
-def test_push_url_method_not_yet_implemented():
-    """Sentinel test: ``push_url`` deliberately doesn't exist yet.
+# HAR-confirmed response envelope shape (pushread-add-har-2026-05-31.json
+# entry 0): the cloud parses the URL server-side and returns the full
+# webpage entry under ``data`` — ``_id`` is the handle used in
+# ``delete_webpages`` for round-trip.
+_PUSH_URL_SAMPLE_RESPONSE = {
+    "result_code": 0,
+    "data": {
+        "_id": "6a1d016edeb4cd4b2109986d",
+        "url": "https://www.terrygodier.com/the-boring-internet",
+        "title": "The Boring Internet",
+        "description": "A visual essay about what actually persists.",
+        "sourceType": 1,
+        "fileType": 1,
+        "parent": None,
+        "user": 387791,
+        "createdAt": "2026-06-01T03:50:06.990Z",
+        "updatedAt": "2026-06-01T03:50:06.990Z",
+        "cbMsg": {"id": "6a1d016edeb4cd4b2109986d", "ok": True, "rev": "1-abc"},
+    },
+    "message": "SUCCESS",
+    "tokenExpiredAt": 1787362074,
+}
 
-    The ``webpage/url`` POST body shape isn't in our HARs — the issue body
-    flagged the gap, and the standing HAR-first rule for this project says
-    don't guess. ``push_url`` lands in a follow-up commit once a webpage-add
-    flow is captured from push.boox.com.
 
-    This sentinel fails the moment someone (a future dispatch, a refactor)
-    adds the method without removing this assertion — a forcing function to
-    review whether the HAR has actually been captured and the body shape is
-    truly known, rather than silently shipping a guessed implementation.
-    """
-    assert not hasattr(pushread.PushRead, "push_url"), (
-        "push_url has been added to PushRead — remove this sentinel and "
-        "the comment in pushread.py once the webpage/url HAR is captured "
-        "and the body shape is verified (see #29 review thread)."
+def test_push_url_default_top_level(mock_http, unit_client):
+    """Default call (no parent folder): body is
+    ``{"url": "...", "parentFolder": null}``, POST + Bearer."""
+    mock_http.post(
+        f"{TEST_API_BASE}/webpage/url",
+        json=_PUSH_URL_SAMPLE_RESPONSE,
     )
+
+    url = "https://www.terrygodier.com/the-boring-internet"
+    result = unit_client.pushread.push_url(url)
+
+    assert result["result_code"] == 0
+    assert result["data"]["_id"] == "6a1d016edeb4cd4b2109986d"
+    assert result["data"]["url"] == url
+
+    req = mock_http.calls[0].request
+    assert req.method == "POST"
+    assert req.url.endswith("/webpage/url")
+    assert req.headers["Authorization"] == f"Bearer {TEST_TOKEN}"
+    assert json.loads(req.body) == {"url": url, "parentFolder": None}
+
+
+def test_push_url_with_parent_folder(mock_http, unit_client):
+    """Explicit ``parent_folder`` threads through to the JSON body verbatim.
+
+    The HAR only confirms the ``null`` (top-level) case; we don't validate
+    the folder-id shape client-side. Pass-through behavior is asserted here
+    so a future "validate folder id" addition is a deliberate change.
+    """
+    mock_http.post(
+        f"{TEST_API_BASE}/webpage/url",
+        json=_PUSH_URL_SAMPLE_RESPONSE,
+    )
+
+    url = "https://example.com/some-article"
+    unit_client.pushread.push_url(url, parent_folder="some-folder-id")
+
+    assert json.loads(mock_http.calls[0].request.body) == {
+        "url": url,
+        "parentFolder": "some-folder-id",
+    }
+
+
+def test_push_url_error_envelope(mock_http, unit_client):
+    """Non-zero ``result_code`` surfaces verbatim (placeholder until #28
+    typed errors)."""
+    mock_http.post(
+        f"{TEST_API_BASE}/webpage/url",
+        json={"result_code": 4001, "message": "auth required", "data": None},
+    )
+
+    result = unit_client.pushread.push_url("https://example.com/x")
+
+    assert result["result_code"] == 4001
+    assert result["message"] == "auth required"
