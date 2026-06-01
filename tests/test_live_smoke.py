@@ -22,6 +22,7 @@ import time
 import uuid
 
 import pytest
+import requests
 
 import boox
 
@@ -161,3 +162,130 @@ def test_live_push_list_delete_roundtrip(live_client, tracked_smoke_pdf):
                     f"Test failed AND cleanup of pushed file (id={pushed_id}) "
                     f"also failed: {exc}. Manual cleanup required."
                 )
+
+
+def _extract_oss_url(entry):
+    """Pull the signed OSS URL from a BooxDrop listing entry.
+
+    The listing entry shape is
+    ``{"data": {"args": {"formats": [<fmt>], "storage": {<fmt>: {"oss":
+    {"url": ...}}}}}}``. The signed URL the device reader uses for
+    download is stored here; ``cloudFiles/download/one`` is a separate
+    cloud-files store and does NOT serve BooxDrop files (see the
+    :mod:`boox.files` module docstring for the surface distinction).
+    """
+    args = entry["data"]["args"]
+    fmt = args["formats"][0]
+    return args["storage"][fmt]["oss"]["url"]
+
+
+@pytest.mark.live
+def test_live_files_module_roundtrip_with_oss_download(
+    live_client, tracked_smoke_pdf
+):
+    """End-to-end against the Phase 2 ``FilesClient`` Pattern A surface.
+
+    Drives the same push → list → delete contract as the legacy flat-client
+    test above, but via ``live_client.files.*`` to validate the new
+    module's wiring. Adds a download step: re-fetches the just-pushed
+    file's bytes through the signed OSS URL stored in the listing
+    entry and asserts they round-trip cleanly.
+
+    The signed-URL path is the one ``boox.files`` documents for BooxDrop
+    file retrieval (see the module docstring) — ``download_file`` itself
+    targets the separate cloudFiles surface and would not see a
+    just-pushed BooxDrop file.
+    """
+    filename = tracked_smoke_pdf.name
+    source_bytes = tracked_smoke_pdf.read_bytes()
+    pushed_id = None
+
+    try:
+        live_client.files.push_file(str(tracked_smoke_pdf))
+
+        entry, files = _poll_for_listing(
+            live_client, filename, present=True, timeout_s=20
+        )
+        assert entry is not None, (
+            f"Just-pushed file {filename!r} not in listing of {len(files)} "
+            f"entries after 20s via files.push_file → files.list_files."
+        )
+        pushed_id = entry["data"]["args"]["_id"]
+
+        # Download via the signed OSS URL stored on the listing entry —
+        # this is the BooxDrop-file download path that the module
+        # docstring directs callers to.
+        oss_url = _extract_oss_url(entry)
+        resp = requests.get(oss_url)
+        resp.raise_for_status()
+        downloaded = resp.content
+        assert downloaded == source_bytes, (
+            f"Downloaded bytes ({len(downloaded)}) != source bytes "
+            f"({len(source_bytes)}). BooxDrop OSS round-trip regression."
+        )
+
+        del_resp = live_client.files.delete_files([pushed_id])
+        assert del_resp.get("result_code") == 0
+        pushed_id = None
+
+        entry_after, _files_after = _poll_for_listing(
+            live_client, filename, present=False, timeout_s=20
+        )
+        assert entry_after is None
+
+    finally:
+        if pushed_id:
+            try:
+                live_client.files.delete_files([pushed_id])
+            except Exception as exc:
+                pytest.fail(
+                    f"Test failed AND files.delete_files cleanup "
+                    f"(id={pushed_id}) also failed: {exc}. Manual "
+                    f"cleanup required."
+                )
+
+
+@pytest.mark.live
+def test_live_download_file_against_cloudfiles_if_present(live_client):
+    """Exercise ``files.download_file`` against the cloud-files surface.
+
+    cloudFiles is a separate store from BooxDrop (see the module
+    docstring) and we don't yet have a captured flow that populates
+    it. This test lists cloudFiles directly and, if at least one entry
+    exists, exercises the download path. Skips if the user's
+    cloudFiles store is empty — that's the common case and not a bug.
+
+    The endpoint shape itself is **bundle-referenced only**: the JS
+    bundle defines the path but no HAR captures a real request. Running
+    this live is the de-facto validation for the inferred shape; if
+    the call returns an unexpected envelope the wrapper's ``ValueError``
+    surfaces clearly.
+    """
+    listing = live_client.api_call(
+        "cloudFiles",
+        params={
+            "limit": 1,
+            "page": 1,
+            "type": "manual",
+            "sortBy": "updatedAt",
+        },
+    )
+    entries = listing.get("data", {}).get("results") or listing.get("list") or []
+    if not entries:
+        pytest.skip(
+            "User's cloudFiles store is empty — no entry to exercise "
+            "files.download_file against. (cloudFiles is separate from "
+            "BooxDrop; see boox.files module docstring.)"
+        )
+
+    entry = entries[0]
+    cf_id = entry.get("_id") or entry.get("id")
+    assert cf_id, f"cloudFiles entry has no usable id field: {entry!r}"
+
+    payload = live_client.files.download_file(cf_id)
+    # Bytes round-trip cleanly + the payload is non-empty. We deliberately
+    # don't assert anything about the content shape — the user's actual
+    # files have arbitrary types — only that the wrapper completed the
+    # API → OSS two-step without raising.
+    assert isinstance(payload, bytes)
+    assert len(payload) > 0
