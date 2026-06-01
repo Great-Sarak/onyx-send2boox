@@ -283,3 +283,15 @@ class Boox:
         intent stays clear at call sites.
         """
         return self.delete_webpages(sub_ids)
+
+
+# Canonical client name from Phase 1 onward. ``Boox`` is kept as a legacy
+# alias so hrw's top-level scripts (``send_file.py``, ``delete_files.py``,
+# etc.) keep working until they're migrated. #45 splits this module body
+# into ``boox/client.py`` + ``boox/_http.py``; for now both names point at
+# the same wholesale class moved from the flat ``boox.py``.
+BooxClient = Boox
+
+from boox._version import __version__  # noqa: E402
+
+__all__ = ["Boox", "BooxClient", "read_config", "__version__"]
