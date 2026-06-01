@@ -84,6 +84,7 @@ When implementing a module:
 | GET | `/api/1/users/v2/me/calibration/size` | bundle-referenced | Device display calibration (probe in Phase 5) |
 | POST | `/api/1/webpage/bat/del` | har-confirmed | **Unified bulk-delete** — handles webpages, RSS subs, OPDS subs (misleadingly-named) |
 | GET | `/api/1/webpage/list` | har-confirmed | List PushRead webpages |
+| POST | `/api/1/webpage/url` | har-confirmed | Push a URL to PushRead — `{"url": "...", "parentFolder": null}`; response carries the full Boox-parsed entry under `data` (incl. `_id` usable in `webpage/bat/del`). HAR: `pushread-add-har-2026-05-31.json`. |
 
 ### `/api/v2/*`
 
