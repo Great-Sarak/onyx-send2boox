@@ -11,6 +11,7 @@ import requests
 import uuid
 
 from boox.auth import Auth, AuthError
+from boox.pushread import PushRead
 
 
 def read_config(filename="config.ini"):
@@ -35,8 +36,10 @@ class Boox:
 
         # Pattern A wiring (project decision #6, locked 2026-05-31): every
         # functional module surfaces as a subobject on the client. ``auth``
-        # is the first; ``pushread`` / ``files`` / etc. land in later phases.
+        # is the first; ``pushread`` follows (#29); ``files`` / etc. land in
+        # later phases.
         self.auth = Auth(self)
+        self.pushread = PushRead(self)
 
         # Cached SyncGatewaySession (fallback only — Phase 1 #27 derives
         # this at runtime from the Bearer JWT). Read here so it's available
