@@ -10,7 +10,16 @@ import oss2
 import requests
 import uuid
 
-from boox.auth import Auth, AuthError
+from boox.auth import Auth
+from boox.errors import (
+    APIError,
+    AuthError,
+    BooxError,
+    NotFoundError,
+    OSSError,
+    RateLimitError,
+    from_response as _error_from_response,
+)
 from boox.pushread import PushRead
 
 
@@ -108,16 +117,27 @@ class Boox:
             headers['Content-Type'] = 'application/json;charset=utf-8'
             method = 'POST'
 
+        # ``requests.RequestException`` (ConnectionError, Timeout, etc.)
+        # deliberately propagates unchanged — see boox/errors.py docstring
+        # for the rationale. Callers that need to recover from transport
+        # failures catch ``requests.RequestException``; callers that need
+        # to recover from API failures catch ``BooxError``.
         r = requests.request(method,
                              f'https://{self.cloud}/{api}/{api_url}',
                              headers=headers,
                              params=params,
                              data=json.dumps(data))
 
-        logging.info(json.dumps(r.json(), indent=4))
+        # Map HTTP status + result_code to a typed exception (#28).
+        exc = _error_from_response(r)
+        if exc is not None:
+            raise exc
+
+        body = r.json()
+        logging.info(json.dumps(body, indent=4))
         logging.info('')
 
-        return r.json()
+        return body
 
     def list_files(self, limit=24, offset=0, source_type=None, parent=0):
         """Fetch a BooxDrop listing; print human-readable + return parsed list.
@@ -185,8 +205,16 @@ class Boox:
 
         token_headers = {'x-oss-security-token': self.security_token}
 
-        oss2.resumable_upload(bucket, remotename, filepath,
-                              headers=token_headers)
+        # Wrap oss2 failures (AccessDenied / network / etc.) in OSSError so
+        # callers don't need to import oss2 just to catch upload errors
+        # (#28). The original exception is preserved as ``__cause__``.
+        try:
+            oss2.resumable_upload(bucket, remotename, filepath,
+                                  headers=token_headers)
+        except oss2.exceptions.OssError as oss_exc:
+            raise OSSError(
+                f"OSS upload failed for {remotename}: {oss_exc}"
+            ) from oss_exc
 
         # File metadata for the bulk_docs registration below.
         file_size = os.path.getsize(filepath)
@@ -329,4 +357,15 @@ BooxClient = Boox
 
 from boox._version import __version__  # noqa: E402
 
-__all__ = ["Boox", "BooxClient", "read_config", "__version__"]
+__all__ = [
+    "APIError",
+    "AuthError",
+    "Boox",
+    "BooxClient",
+    "BooxError",
+    "NotFoundError",
+    "OSSError",
+    "RateLimitError",
+    "read_config",
+    "__version__",
+]

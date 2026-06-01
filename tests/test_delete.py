@@ -74,17 +74,20 @@ def test_delete_files_empty_list_still_posts(mock_http, unit_client):
     assert json.loads(mock_http.calls[0].request.body) == {"ids": []}
 
 
-def test_delete_files_error_envelope(mock_http, unit_client):
-    """Non-zero result_code surfaces (placeholder until #28 typed errors)."""
+def test_delete_files_raises_api_error_on_nonzero_result_code(
+    mock_http, unit_client
+):
+    """Non-zero result_code raises ``APIError`` (#28)."""
+    from boox.errors import APIError
+
     mock_http.post(
         f"{TEST_API_BASE}/push/message/batchDelete",
         json={"result_code": 1, "message": "boom", "data": None},
     )
 
-    result = unit_client.delete_files(["x"])
-
-    assert result["result_code"] == 1
-    assert result["message"] == "boom"
+    with pytest.raises(APIError) as excinfo:
+        unit_client.delete_files(["x"])
+    assert excinfo.value.result_code == 1
 
 
 # --------------------------- delete_webpages -------------------------------

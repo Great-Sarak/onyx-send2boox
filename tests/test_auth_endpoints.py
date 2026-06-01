@@ -158,37 +158,39 @@ def test_init_chain_passes_uid_to_im_get_sig(mock_http, boox_config):
 # --------------------------- Error paths -----------------------------------
 
 
-def test_authenticated_call_returns_error_envelope(mock_http, unit_client):
-    """Non-zero ``result_code`` surfaces in the parsed response.
+def test_authenticated_call_raises_api_error_on_nonzero_result_code(
+    mock_http, unit_client
+):
+    """Non-zero ``result_code`` on a 2xx response raises ``APIError`` (#28)."""
+    from boox.errors import APIError
 
-    Phase 0 doesn't yet have a typed-error layer (lands in #28); for now
-    we just assert that the caller can see the failure in the JSON
-    envelope, which is what hrw's api_call returns regardless of status.
-    """
     mock_http.get(
         f"{TEST_API_BASE}/users/me",
         json={"result_code": 1, "message": "boom", "data": None},
         status=200,  # Boox often returns 200 with result_code != 0
     )
-    resp = unit_client.api_call("users/me")
-    assert resp["result_code"] == 1
-    assert resp["message"] == "boom"
+    with pytest.raises(APIError) as excinfo:
+        unit_client.api_call("users/me")
+    exc = excinfo.value
+    assert exc.status_code == 200
+    assert exc.result_code == 1
+    assert "boom" in exc.response_body
 
 
-def test_authenticated_call_on_401(mock_http, unit_client):
-    """401 from the cloud parses to a Boox-style error envelope.
+def test_authenticated_call_on_401_raises_auth_error(mock_http, unit_client):
+    """401 from the cloud raises ``AuthError`` (#28)."""
+    from boox.errors import AuthError
 
-    Tracked as a Phase 1 follow-up (#28): the AuthError class will let
-    callers branch on this without inspecting result_code by hand.
-    """
     mock_http.get(
         f"{TEST_API_BASE}/users/me",
         json={"result_code": 100, "message": "Unauthorized", "data": None},
         status=401,
     )
-    resp = unit_client.api_call("users/me")
-    # Today: response is the parsed JSON regardless of HTTP status.
-    assert resp["message"] == "Unauthorized"
+    with pytest.raises(AuthError) as excinfo:
+        unit_client.api_call("users/me")
+    exc = excinfo.value
+    assert exc.status_code == 401
+    assert exc.result_code == 100
 
 
 # --------------------------- POST + data path -----------------------------
