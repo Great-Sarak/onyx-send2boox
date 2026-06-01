@@ -10,6 +10,8 @@ import oss2
 import requests
 import uuid
 
+from boox.auth import Auth, AuthError
+
 
 def read_config(filename="config.ini"):
     config = configparser.ConfigParser()
@@ -31,12 +33,17 @@ class Boox:
         else:
             self.cloud = 'eur.boox.com'
 
-        # Sync Gateway session cookie — used for /neocloud/* calls, set
-        # alongside the Bearer JWT from the same browser harvest. Optional
-        # so existing code paths that don't touch Sync Gateway keep working
-        # without it. Both ConfigParser SectionProxy and plain dict expose
-        # .get(); .get('sync_token') returns None when the key is absent.
-        self.sync_token = config['default'].get('sync_token') or None
+        # Pattern A wiring (project decision #6, locked 2026-05-31): every
+        # functional module surfaces as a subobject on the client. ``auth``
+        # is the first; ``pushread`` / ``files`` / etc. land in later phases.
+        self.auth = Auth(self)
+
+        # Cached SyncGatewaySession (fallback only — Phase 1 #27 derives
+        # this at runtime from the Bearer JWT). Read here so it's available
+        # if the runtime mint fails. Both ConfigParser SectionProxy and
+        # plain dict expose ``.get()``.
+        cached_sync_token = config['default'].get('sync_token') or None
+        self.sync_token = cached_sync_token
 
         if skip_init:
             self.token = False
@@ -56,6 +63,31 @@ class Boox:
 
             self.bucket_name = onyx_cloud['bucket']
             self.endpoint = onyx_cloud['aliEndpoint']
+
+            # Runtime-mint the SyncGatewaySession cookie from the Bearer
+            # JWT (#27). If the mint call fails, fall back to the cached
+            # value if any — preserves the Phase 0 behavior where the
+            # cookie was loaded from config — and emit a warning so the
+            # divergence isn't silent. If neither path produces a token,
+            # /neocloud/* calls will fail with a clearer message at the
+            # call site (send_file warns explicitly).
+            try:
+                self.auth.mint_sync_session()
+            except (AuthError, requests.RequestException) as exc:
+                if cached_sync_token:
+                    logging.warning(
+                        "syncToken mint failed (%s); falling back to "
+                        "cached BOOX_SYNC_TOKEN from config",
+                        exc,
+                    )
+                    self.sync_token = cached_sync_token
+                else:
+                    logging.warning(
+                        "syncToken mint failed (%s) and no cached "
+                        "BOOX_SYNC_TOKEN; /neocloud/* calls will be "
+                        "unauthenticated",
+                        exc,
+                    )
 
     def login_with_email(self, email, code):
 
