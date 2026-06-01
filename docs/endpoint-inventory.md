@@ -25,27 +25,26 @@ When implementing a module:
 | GET | `/api/1/appVersions/android/one` | bundle-referenced | Android app version probe |
 | GET | `/api/1/auth/qrcode/check` | bundle-referenced | QR-code login state |
 | POST | `/api/1/auth/qrcode/create` | bundle-referenced | QR-code login init |
-| GET | `/api/1/cb/setFeedbackRead` (sic, POST in bundle) | bundle-referenced | |
-| POST | `/api/1/cb/setFeedbackRead` | bundle-referenced | Mark feedback dialog read |
-| GET | `/api/1/cloudFiles` | bundle-referenced | List cloud-stored files (not BooxDrop) |
+| POST | `/api/1/cb/setFeedbackRead` | har-confirmed | Mark feedback dialog read (settings HAR 2026-05-31) |
+| GET | `/api/1/cloudFiles` | har-confirmed | List cloud-stored files (not BooxDrop) (settings HAR 2026-05-31) |
 | GET | `/api/1/cloudFiles/download/one` | bundle-referenced | Download one cloud file |
 | GET | `/api/1/config/buckets` | har-confirmed | OSS bucket / endpoint info (init chain) |
 | GET | `/api/1/config/stss` | har-confirmed | STS credentials for OSS upload |
 | GET | `/api/1/configUsers/one` | har-confirmed | User config snapshot |
 | POST | `/api/1/devices/disable/token` | bundle-referenced | Disable a device token |
-| POST | `/api/1/devices/lock` | bundle-referenced | Remote lock a device |
+| POST | `/api/1/devices/lock` | har-confirmed | Body `{"id": <device_id>, "type": "lock"\|"unlock"}` (settings HAR 2026-05-31) |
 | POST | `/api/1/devices/lock/description` | bundle-referenced | Set lock-message text |
-| GET | `/api/1/faqs` | bundle-referenced | FAQ list |
-| GET | `/api/1/faqs/category/index` | bundle-referenced | FAQ categories |
+| GET | `/api/1/faqs` | har-confirmed | FAQ list (settings HAR 2026-05-31) |
+| GET | `/api/1/faqs/category/index` | har-confirmed | FAQ categories (settings HAR 2026-05-31) |
 | GET | `/api/1/favs` | har-confirmed | Favorites listing |
 | POST | `/api/1/giftCards/active/gift` | bundle-referenced | Activate gift card |
 | POST | `/api/1/giftCards/check/code` | bundle-referenced | Validate gift code |
 | POST | `/api/1/giftCards/copy/code` | bundle-referenced | |
 | GET | `/api/1/giftCards/my/gift` | bundle-referenced | List my gift cards |
-| GET | `/api/1/im/getFeedbackDialog` | bundle-referenced | |
+| GET | `/api/1/im/getFeedbackDialog` | har-confirmed | (settings HAR 2026-05-31) |
 | GET | `/api/1/im/getSig` | community-documented | hrw's init chain — IM signature (purpose unknown) |
 | GET | `/api/1/loginAds/show/one` | bundle-referenced | Login-page ad |
-| GET | `/api/1/manualGroups` | bundle-referenced | |
+| GET | `/api/1/manualGroups` | har-confirmed | Device-manual listing (settings HAR 2026-05-31) |
 | POST | `/api/1/pcDownloads` | bundle-referenced | Desktop app download tracking |
 | POST | `/api/1/push/message/batchDelete` | har-confirmed | Delete BooxDrop files (NB: same endpoint, "files" semantic) |
 | POST | `/api/1/push/saveAndPush` | har-confirmed | Notify Boox cloud of a BooxDrop upload |
@@ -57,10 +56,10 @@ When implementing a module:
 | POST | `/api/1/rsses/url/content` | har-confirmed | Boox-side fetch + parse of a feed URL (validate/preview) |
 | POST | `/api/1/screenSavers/push` | har-confirmed | Push screensaver image (newer than the push/saveAndPush+sourceType=100 path) |
 | GET | `/api/1/serverInfos` | har-confirmed | Server build info |
-| POST | `/api/1/statistics/del/userdata` | bundle-referenced | Delete user data |
+| POST | `/api/1/statistics/del/userdata` | har-confirmed | **Broken server-side** — returns 500 `{result_code: 1, message: "No Server!"}` (settings HAR 2026-05-31) |
 | GET | `/api/1/statistics/personalUsageAmount` | bundle-referenced | Account-level usage stats |
 | POST | `/api/1/statistics/readInfoList` | bundle-referenced | Reading statistics POST |
-| GET | `/api/1/statistics/v2/user/storage` | bundle-referenced | Storage usage |
+| GET | `/api/1/statistics/v2/user/storage` | har-confirmed | Storage usage (settings HAR 2026-05-31) |
 | POST | `/api/1/subscribe/folder` | har-confirmed | Create a subscription folder |
 | GET | `/api/1/subscribe/list` | har-confirmed | List subscriptions (filter by sourceType) |
 | POST | `/api/1/subscribe/sub` | har-confirmed | Subscribe a catalog feed under a folder |
@@ -78,9 +77,9 @@ When implementing a module:
 | POST | `/api/1/users/resetInfoConfirm` | bundle-referenced | |
 | POST | `/api/1/users/sendVerifyCode` | bundle-referenced | **Captcha-gated** SMS / email code sender (deferred to Phase 5 — see `flora/BOOX.md` §"Refresh procedure"). |
 | POST | `/api/1/users/signupByPhoneOrEmail` | bundle-referenced | Exchange verification code for JWT |
-| GET | `/api/1/users/syncToken` | har-confirmed | **Token refresh** — extend the JWT without re-running the SMS+captcha flow (worth probing for Phase 5) |
+| GET | `/api/1/users/syncToken` | har-confirmed | **Mints the SyncGatewaySession cookie from the Bearer JWT.** Returns `{session_id, expires (~3 weeks), cookie_name: "SyncGatewaySession", channels: []}` (settings HAR 2026-05-31). **Big Phase 5 simplification:** we never need to harvest the cookie separately — Bearer JWT is the sole manually-refreshed credential; the cookie is derived at runtime. Phase 1 auth module (#27) will call this on startup. |
 | POST | `/api/1/users/unbindAssociatedAccount` | bundle-referenced | |
-| PUT | `/api/1/users/updateInfo` | bundle-referenced | Edit profile fields |
+| PUT | `/api/1/users/updateInfo` | har-confirmed | Edit profile fields (settings HAR 2026-05-31) |
 | POST | `/api/1/users/updatePhoneOrEmail` | bundle-referenced | Change contact |
 | GET | `/api/1/users/v2/me/calibration/size` | bundle-referenced | Device display calibration (probe in Phase 5) |
 | POST | `/api/1/webpage/bat/del` | har-confirmed | **Unified bulk-delete** — handles webpages, RSS subs, OPDS subs (misleadingly-named) |
