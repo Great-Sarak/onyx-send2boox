@@ -270,17 +270,23 @@ def test_send_file_bulk_docs_uses_message_channel_and_session_cookie(
 # --------------------------- Error paths -----------------------------------
 
 
-def test_send_file_propagates_oss_failures(
+def test_send_file_wraps_oss_failures_in_oss_error(
     mock_http, push_ready_client, oss_mocks, tmp_path
 ):
-    """OSS upload failures bubble up — never swallowed silently."""
+    """OSS upload failures wrap in ``OSSError`` so callers don't import oss2 (#28)."""
     f = tmp_path / "x.pdf"
     f.write_bytes(b"%PDF")
     _stub_stss_and_save(mock_http)
     import oss2
 
-    oss_mocks["resumable_upload"].side_effect = oss2.exceptions.OssError(
-        500, {}, "<Error/>", {}
-    )
-    with pytest.raises(oss2.exceptions.OssError):
+    from boox.errors import OSSError
+
+    oss_exc = oss2.exceptions.OssError(500, {}, "<Error/>", {})
+    oss_mocks["resumable_upload"].side_effect = oss_exc
+
+    with pytest.raises(OSSError) as excinfo:
         push_ready_client.send_file(str(f))
+
+    # __cause__ chain preserves the original oss2 exception for inspection.
+    assert excinfo.value.__cause__ is oss_exc
+    assert excinfo.value.oss_exception is oss_exc

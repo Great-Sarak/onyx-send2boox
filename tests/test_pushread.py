@@ -100,18 +100,20 @@ def test_list_webpages_empty_listing(mock_http, unit_client):
     assert result["count"] == 0
 
 
-def test_list_webpages_error_envelope(mock_http, unit_client):
-    """Non-zero ``result_code`` is surfaced verbatim (typed errors come with
-    #28 — until then callers branch on ``result_code`` themselves)."""
+def test_list_webpages_raises_api_error_on_nonzero_result_code(
+    mock_http, unit_client
+):
+    """Non-zero ``result_code`` raises ``APIError`` (#28)."""
+    from boox.errors import APIError
+
     mock_http.get(
         f"{TEST_API_BASE}/webpage/list",
         json={"result_code": 4001, "message": "auth required", "list": []},
     )
 
-    result = unit_client.pushread.list_webpages()
-
-    assert result["result_code"] == 4001
-    assert result["message"] == "auth required"
+    with pytest.raises(APIError) as excinfo:
+        unit_client.pushread.list_webpages()
+    assert excinfo.value.result_code == 4001
 
 
 # --------------------------- delete_webpages -------------------------------
@@ -175,17 +177,20 @@ def test_delete_webpages_empty_list_still_posts(mock_http, unit_client):
     assert json.loads(mock_http.calls[0].request.body) == {"ids": []}
 
 
-def test_delete_webpages_error_envelope(mock_http, unit_client):
-    """Non-zero ``result_code`` surfaces (placeholder until #28 typed errors)."""
+def test_delete_webpages_raises_api_error_on_nonzero_result_code(
+    mock_http, unit_client
+):
+    """Non-zero ``result_code`` raises ``APIError`` (#28)."""
+    from boox.errors import APIError
+
     mock_http.post(
         f"{TEST_API_BASE}/webpage/bat/del",
         json={"result_code": 1, "message": "boom", "data": None},
     )
 
-    result = unit_client.pushread.delete_webpages(["x"])
-
-    assert result["result_code"] == 1
-    assert result["message"] == "boom"
+    with pytest.raises(APIError) as excinfo:
+        unit_client.pushread.delete_webpages(["x"])
+    assert excinfo.value.result_code == 1
 
 
 # --------------------------- push_url --------------------------------------
@@ -258,15 +263,17 @@ def test_push_url_with_parent_folder(mock_http, unit_client):
     }
 
 
-def test_push_url_error_envelope(mock_http, unit_client):
-    """Non-zero ``result_code`` surfaces verbatim (placeholder until #28
-    typed errors)."""
+def test_push_url_raises_api_error_on_nonzero_result_code(
+    mock_http, unit_client
+):
+    """Non-zero ``result_code`` raises ``APIError`` (#28)."""
+    from boox.errors import APIError
+
     mock_http.post(
         f"{TEST_API_BASE}/webpage/url",
         json={"result_code": 4001, "message": "auth required", "data": None},
     )
 
-    result = unit_client.pushread.push_url("https://example.com/x")
-
-    assert result["result_code"] == 4001
-    assert result["message"] == "auth required"
+    with pytest.raises(APIError) as excinfo:
+        unit_client.pushread.push_url("https://example.com/x")
+    assert excinfo.value.result_code == 4001

@@ -60,15 +60,7 @@ import time
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-
-class AuthError(Exception):
-    """Raised when token loading, decoding, or session minting fails.
-
-    Carries the same shape regardless of failure source — callers can
-    branch on the message or just surface it. A typed-error hierarchy
-    (``AuthError``, ``RateLimitError``, etc.) is the subject of #28; until
-    then this single class covers the auth paths.
-    """
+from boox.errors import APIError, AuthError
 
 
 # --------------------------- JWT helpers ----------------------------------
@@ -231,12 +223,22 @@ class Auth:
         exceptions from ``requests`` propagate unchanged so callers can
         distinguish transport failures (retry candidate) from auth
         failures (not a retry candidate).
+
+        The non-zero ``result_code`` path is now driven by ``api_call``'s
+        typed-error mapping (#28): ``api_call`` raises ``APIError`` which
+        we re-raise as ``AuthError`` to preserve the long-standing
+        contract that the init chain's ``except (AuthError, ...)`` catches
+        a failed syncToken mint.
         """
-        resp = self._c.api_call("users/syncToken")
-        if resp.get("result_code") != 0:
+        try:
+            resp = self._c.api_call("users/syncToken")
+        except APIError as exc:
             raise AuthError(
-                f"users/syncToken returned non-zero result_code: {resp}"
-            )
+                f"users/syncToken failed: {exc}",
+                response_body=exc.response_body,
+                status_code=exc.status_code,
+                result_code=exc.result_code,
+            ) from exc
         data = resp.get("data") or {}
         session_id = data.get("session_id")
         if not session_id:
