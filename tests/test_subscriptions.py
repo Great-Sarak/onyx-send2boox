@@ -1,7 +1,7 @@
 """Unit tests for ``boox.subscriptions``.
 
 Covers the Pattern A ``SubscriptionsClient`` subobject wired onto
-``BooxClient`` (#30).
+``BooxClient`` (#30, #31).
 
 Endpoint coverage (all HAR-confirmed):
 
@@ -12,8 +12,13 @@ Endpoint coverage (all HAR-confirmed):
 - ``GET  /api/1/rsses/public/recommend`` — HAR-confirmed (push-boox-har-2026-05-31.json).
 - ``GET  /api/1/rsses/one/detail``       — HAR-confirmed (push-boox-har-2026-05-31.json).
 - ``POST /api/1/rsses/url/content``      — HAR-confirmed (push-boox-har-2026-05-31.json).
+- ``POST /api/1/webpage/bat/del``        — HAR-confirmed (rss-subscribe-har-2026-05-31.json, #31).
+- ``POST /api/1/rsses/opml/export``      — HAR-confirmed (push-boox-har-2026-05-31.json, #31).
+- ``GET  /uploads/feed/export/<uuid>.opml`` — HAR-confirmed follow-up (#31).
+- ``POST /api/1/rsses/opml/import``      — HAR-confirmed (rss-subscribe-har-2026-05-31.json, #31; observed 500).
 
 Added by #30 (Phase 2 Subscriptions module — catalog ops & folders).
+Extended in #31 (OPML import/export + unsubscribe).
 """
 
 import json
@@ -23,7 +28,7 @@ import pytest
 import boox
 from boox import subscriptions
 from boox.subscriptions import FeedType, SubscriptionsClient
-from .conftest import TEST_API_BASE, TEST_TOKEN
+from .conftest import TEST_API_BASE, TEST_CLOUD, TEST_TOKEN
 
 
 # --------------------------- Wiring (Pattern A) ----------------------------
@@ -557,4 +562,301 @@ def test_preview_feed_url_raises_api_error_on_nonzero_result_code(
 
     with pytest.raises(APIError) as excinfo:
         unit_client.subscriptions.preview_feed_url("https://x", FeedType.RSS)
+    assert excinfo.value.result_code == 4001
+
+
+# --------------------------- unsubscribe / unsubscribe_many ---------------
+
+
+# HAR-confirmed (rss-subscribe-har-2026-05-31.json):
+#   POST https://push.boox.com/api/1/webpage/bat/del
+#   body  {"ids":["6a1c9ce3961d4d4b17564650"]}
+#   resp  {"result_code":0,"data":"ok","message":"SUCCESS","tokenExpiredAt":...}
+_BAT_DEL_OK_RESPONSE = {
+    "result_code": 0,
+    "data": "ok",
+    "message": "SUCCESS",
+}
+
+
+def test_unsubscribe_single_body_shape(mock_http, unit_client):
+    """``unsubscribe(sub_id)`` posts ``{"ids": [<sub_id>]}`` to ``webpage/bat/del``."""
+    mock_http.post(
+        f"{TEST_API_BASE}/webpage/bat/del",
+        json=_BAT_DEL_OK_RESPONSE,
+    )
+
+    result = unit_client.subscriptions.unsubscribe("6a1c9ce3961d4d4b17564650")
+
+    assert result == _BAT_DEL_OK_RESPONSE
+
+    req = mock_http.calls[0].request
+    assert req.method == "POST"
+    assert req.url.endswith("/webpage/bat/del")
+    assert req.headers["Authorization"] == f"Bearer {TEST_TOKEN}"
+    assert json.loads(req.body) == {"ids": ["6a1c9ce3961d4d4b17564650"]}
+
+
+def test_unsubscribe_many_body_shape(mock_http, unit_client):
+    """``unsubscribe_many(ids)`` threads all ids into one ``webpage/bat/del`` body."""
+    mock_http.post(
+        f"{TEST_API_BASE}/webpage/bat/del",
+        json=_BAT_DEL_OK_RESPONSE,
+    )
+
+    ids = ["aaa", "bbb", "ccc"]
+    result = unit_client.subscriptions.unsubscribe_many(ids)
+
+    assert result == _BAT_DEL_OK_RESPONSE
+    assert json.loads(mock_http.calls[0].request.body) == {"ids": ids}
+
+
+def test_unsubscribe_many_empty_list_is_client_side_noop(mock_http, unit_client):
+    """Empty ``sub_ids`` short-circuits to ``None`` with no network call.
+
+    Documented behavior — see the docstring on ``unsubscribe_many``.
+    The endpoint hasn't been HAR-captured with an empty ``ids`` array, so
+    rather than guess the server's handling we return ``None`` so callers
+    using filter expressions can no-op cleanly.
+    """
+    # No mock_http.post registered: any outgoing request would fail the
+    # responses fixture's ConnectionError check, asserting the no-op.
+    result = unit_client.subscriptions.unsubscribe_many([])
+
+    assert result is None
+    assert len(mock_http.calls) == 0
+
+
+def test_unsubscribe_many_accepts_arbitrary_sequence(mock_http, unit_client):
+    """``Sequence`` typing — tuples / generators work, body still serializes."""
+    mock_http.post(
+        f"{TEST_API_BASE}/webpage/bat/del",
+        json=_BAT_DEL_OK_RESPONSE,
+    )
+
+    unit_client.subscriptions.unsubscribe_many(("a", "b"))
+
+    assert json.loads(mock_http.calls[0].request.body) == {"ids": ["a", "b"]}
+
+
+def test_unsubscribe_raises_api_error_on_nonzero_result_code(
+    mock_http, unit_client
+):
+    """Non-zero ``result_code`` raises ``APIError`` (#28)."""
+    from boox.errors import APIError
+
+    mock_http.post(
+        f"{TEST_API_BASE}/webpage/bat/del",
+        json={"result_code": 1, "message": "boom", "data": None},
+    )
+
+    with pytest.raises(APIError) as excinfo:
+        unit_client.subscriptions.unsubscribe("x")
+    assert excinfo.value.result_code == 1
+
+
+# --------------------------- export_opml -----------------------------------
+
+
+# HAR-confirmed (push-boox-har-2026-05-31.json / rss-subscribe HAR):
+# 1. POST /api/1/rsses/opml/export -> {"data": "/uploads/feed/export/<uuid>.opml", ...}
+# 2. GET <cloud><relative_url>     -> OPML bytes (no Authorization header in capture).
+_EXPORT_RELATIVE_URL = "/uploads/feed/export/dfac64fc-080a-4f22-9f4a-7a9ce08b4dc7.opml"
+_EXPORT_FILE_URL = f"https://{TEST_CLOUD}{_EXPORT_RELATIVE_URL}"
+
+# Compact but valid OPML so tests can assert on real content shape.
+_SAMPLE_OPML = (
+    b'<?xml version="1.0" encoding="UTF-8"?>'
+    b'<opml version="2.0"><head><title>Subscriptions</title></head>'
+    b'<body><outline text="IEEE Spectrum" type="rss" '
+    b'xmlUrl="https://spectrum.ieee.org/feeds/feed.rss"/></body></opml>'
+)
+
+
+def test_export_opml_returns_fetched_file_bytes(mock_http, unit_client):
+    """Two-step flow: POST export → GET file → return ``bytes``."""
+    mock_http.post(
+        f"{TEST_API_BASE}/rsses/opml/export",
+        json={
+            "result_code": 0,
+            "data": _EXPORT_RELATIVE_URL,
+            "message": "SUCCESS",
+        },
+    )
+    mock_http.get(_EXPORT_FILE_URL, body=_SAMPLE_OPML, status=200)
+
+    result = unit_client.subscriptions.export_opml()
+
+    assert result == _SAMPLE_OPML
+
+    # First call is the POST to /rsses/opml/export.
+    post_req = mock_http.calls[0].request
+    assert post_req.method == "POST"
+    assert post_req.url.endswith("/rsses/opml/export")
+    assert post_req.headers["Authorization"] == f"Bearer {TEST_TOKEN}"
+    # HAR-confirmed empty body — matches the captured Content-Length: 0.
+    assert not post_req.body
+
+    # Second call is the GET to the relative URL composed with the cloud.
+    get_req = mock_http.calls[1].request
+    assert get_req.method == "GET"
+    assert get_req.url == _EXPORT_FILE_URL
+    # Captured browser GET sent no Authorization header — we mirror that.
+    assert "Authorization" not in get_req.headers
+
+
+def test_export_opml_post_raises_api_error_on_nonzero_result_code(
+    mock_http, unit_client
+):
+    """Non-zero ``result_code`` on the export-generation POST raises ``APIError``."""
+    from boox.errors import APIError
+
+    mock_http.post(
+        f"{TEST_API_BASE}/rsses/opml/export",
+        json={"result_code": 4001, "message": "auth required", "data": None},
+    )
+
+    with pytest.raises(APIError) as excinfo:
+        unit_client.subscriptions.export_opml()
+    assert excinfo.value.result_code == 4001
+
+
+def test_export_opml_propagates_http_error_on_file_fetch(
+    mock_http, unit_client
+):
+    """Non-2xx on the static-file GET surfaces via ``raise_for_status``.
+
+    The OPML file URL is static content (no result-code envelope), so we
+    fall back to the transport-layer error rather than the typed
+    ``BooxError`` path used by JSON endpoints.
+    """
+    import requests as _requests
+
+    mock_http.post(
+        f"{TEST_API_BASE}/rsses/opml/export",
+        json={
+            "result_code": 0,
+            "data": _EXPORT_RELATIVE_URL,
+            "message": "SUCCESS",
+        },
+    )
+    mock_http.get(_EXPORT_FILE_URL, body="not found", status=404)
+
+    with pytest.raises(_requests.HTTPError):
+        unit_client.subscriptions.export_opml()
+
+
+# --------------------------- import_opml -----------------------------------
+
+
+def _multipart_body_text(req):
+    """Decode the ``responses``-captured multipart body to str for assertions.
+
+    ``responses`` (built on urllib3) sends the multipart body as bytes;
+    decode to UTF-8 with replacement so byte-level assertions on the
+    headers and field name still work even if the file content isn't
+    decodable.
+    """
+    body = req.body
+    if isinstance(body, (bytes, bytearray)):
+        return body.decode("utf-8", errors="replace")
+    return body
+
+
+def test_import_opml_multipart_shape(mock_http, unit_client):
+    """Multipart body carries a ``file`` field with the supplied bytes."""
+    mock_http.post(
+        f"{TEST_API_BASE}/rsses/opml/import",
+        json={
+            "result_code": 0,
+            "data": {"imported": 1, "failed": 0},
+            "message": "SUCCESS",
+        },
+    )
+
+    result = unit_client.subscriptions.import_opml(
+        _SAMPLE_OPML, filename="round-trip.opml"
+    )
+
+    assert result["result_code"] == 0
+
+    req = mock_http.calls[0].request
+    assert req.method == "POST"
+    assert req.url.endswith("/rsses/opml/import")
+    assert req.headers["Authorization"] == f"Bearer {TEST_TOKEN}"
+    # multipart/form-data with the same boundary urllib3 generated.
+    content_type = req.headers.get("Content-Type", "")
+    assert content_type.startswith("multipart/form-data"), content_type
+    assert "boundary=" in content_type
+
+    body_text = _multipart_body_text(req)
+    # Field name and supplied filename appear in the part header.
+    assert 'name="file"' in body_text
+    assert 'filename="round-trip.opml"' in body_text
+    # File content type mirrors the captured browser request.
+    assert "text/x-opml+xml" in body_text
+    # File bytes themselves are present in the multipart body.
+    assert _SAMPLE_OPML.decode("utf-8") in body_text
+
+
+def test_import_opml_default_filename(mock_http, unit_client):
+    """``filename`` defaults to ``subscriptions.opml`` when caller omits it."""
+    mock_http.post(
+        f"{TEST_API_BASE}/rsses/opml/import",
+        json={"result_code": 0, "data": None, "message": "SUCCESS"},
+    )
+
+    unit_client.subscriptions.import_opml(_SAMPLE_OPML)
+
+    body_text = _multipart_body_text(mock_http.calls[0].request)
+    assert 'filename="subscriptions.opml"' in body_text
+
+
+def test_import_opml_surfaces_500_parse_error_as_api_error(
+    mock_http, unit_client
+):
+    """HTTP 500 + ``{"result_code":1, "message": "Attribute without value..."}`` raises ``APIError``.
+
+    Mirrors the failure observed in the 2026-05-31 capture
+    (``rss-subscribe-har-2026-05-31.json`` entries 87/88). The
+    upstream-parser message is preserved on the exception so callers
+    can show what Boox actually said.
+    """
+    from boox.errors import APIError
+
+    parser_message = (
+        "Attribute without value\nLine: 6\nColumn: 19\nChar: s"
+    )
+    mock_http.post(
+        f"{TEST_API_BASE}/rsses/opml/import",
+        json={"result_code": 1, "message": parser_message, "data": None},
+        status=500,
+    )
+
+    with pytest.raises(APIError) as excinfo:
+        unit_client.subscriptions.import_opml(b"<not-real-opml/>")
+
+    assert excinfo.value.status_code == 500
+    assert excinfo.value.result_code == 1
+    # The upstream parser message is preserved verbatim on the response
+    # body so debugging callers can see exactly what Boox returned.
+    # response_body is the raw JSON text — parse it and assert the
+    # message round-trips with its real newlines intact.
+    assert excinfo.value.response_body is not None
+    assert json.loads(excinfo.value.response_body)["message"] == parser_message
+
+
+def test_import_opml_raises_api_error_on_2xx_nonzero_result_code(
+    mock_http, unit_client
+):
+    """A 200 OK with non-zero ``result_code`` still raises ``APIError``."""
+    from boox.errors import APIError
+
+    mock_http.post(
+        f"{TEST_API_BASE}/rsses/opml/import",
+        json={"result_code": 4001, "message": "auth required", "data": None},
+    )
+
+    with pytest.raises(APIError) as excinfo:
+        unit_client.subscriptions.import_opml(_SAMPLE_OPML)
     assert excinfo.value.result_code == 4001

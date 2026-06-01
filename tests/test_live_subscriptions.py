@@ -1,15 +1,16 @@
-"""Live round-trip test for the Subscriptions module — folder + subscribe + list.
+"""Live round-trip tests for the Subscriptions module — folder + subscribe + list, OPML round-trip, unsubscribe.
 
 Drives a real ``POST /api/1/subscribe/folder`` against push.boox.com,
 catalog-searches for IEEE Spectrum (HAR-confirmed catalog match),
 subscribes to it under the new folder, confirms via
-``GET /api/1/subscribe/list``, then cleans up the user-sub and folder via
-the legacy ``Boox.delete_webpages`` endpoint (catalog-side feed docs and
-folders both route through ``webpage/bat/del`` per the 2026-05-31
-unsubscribe finding; this stays consistent until #31 carves out
-``unsubscribe()`` as its own subscriptions method).
+``GET /api/1/subscribe/list``, then exercises the per-module unsubscribe
+and OPML import / export methods (#31). All paths route through the
+unified ``POST /api/1/webpage/bat/del`` endpoint for cleanup, per the
+2026-05-31 finding that the misleadingly-named ``webpage/bat/del`` is the
+single bulk-delete used for webpages, RSS feeds, OPDS feeds, and
+folders.
 
-This test only needs the Bearer JWT (``BOOX_TOKEN``) — the
+These tests only need the Bearer JWT (``BOOX_TOKEN``) — the
 ``subscribe/*`` and ``rsses/*`` surfaces are both on /api/1 and accept
 Bearer auth. No SyncGatewaySession required.
 
@@ -20,13 +21,16 @@ Skipped by default; run with:
     pytest -m live tests/test_live_subscriptions.py -v
 
 Added by #30 (Subscriptions module — catalog ops & folders).
+Extended in #31 (OPML import/export + unsubscribe).
 """
 
 import uuid
+import xml.etree.ElementTree as ET
 
 import pytest
 
 import boox
+from boox.errors import APIError
 from boox.subscriptions import FeedType
 
 
@@ -130,5 +134,227 @@ def test_subscriptions_round_trip(live_subscriptions_client):
             except Exception as exc:
                 pytest.fail(
                     f"Cleanup of subscription/folder ids {cleanup_ids} "
+                    f"failed: {exc}. Manual cleanup required."
+                )
+
+
+# --------------------------- unsubscribe (#31) -----------------------------
+
+
+@pytest.mark.live
+def test_unsubscribe_via_module_method(live_subscriptions_client):
+    """Per-module ``unsubscribe`` removes a real user-sub record.
+
+    Mirrors ``test_subscriptions_round_trip`` but the cleanup uses the
+    new ``SubscriptionsClient.unsubscribe`` method instead of the legacy
+    flat-client ``delete_webpages``. Confirms the unified
+    ``webpage/bat/del`` endpoint accepts the same request shape from
+    both surfaces (they share wire format by design — #31 just adds
+    a clearer name at the call site).
+
+    Final verification: re-list subscriptions, assert the user-sub _id
+    is no longer present.
+    """
+    client = live_subscriptions_client
+    folder_title = f"pytest-unsub-rss-{uuid.uuid4().hex[:8]}"
+    folder_id = None
+    user_sub_id = None
+
+    try:
+        folder_resp = client.subscriptions.create_folder(
+            folder_title, FeedType.RSS
+        )
+        folder_id = folder_resp["data"]["_id"]
+
+        search_resp = client.subscriptions.search_catalog(
+            _IEEE_SPECTRUM_FEED_URL, FeedType.RSS
+        )
+        assert search_resp["data"]["count"] >= 1, (
+            f"IEEE Spectrum no longer in catalog (count="
+            f"{search_resp['data']['count']}); update the live-test URL."
+        )
+        feed_id = search_resp["data"]["results"][0]["_id"]
+
+        sub_resp = client.subscriptions.subscribe(
+            feed_id=feed_id, parent_folder_id=folder_id
+        )
+        user_sub_id = sub_resp["data"]["_id"]
+
+        # Exercise the new per-module method specifically.
+        unsub_resp = client.subscriptions.unsubscribe(user_sub_id)
+        assert unsub_resp["result_code"] == 0, (
+            f"unsubscribe returned non-zero: {unsub_resp}"
+        )
+
+        # Verify: the user-sub _id should no longer appear in the listing.
+        list_resp = client.subscriptions.list_subscriptions(FeedType.RSS)
+        all_ids = set()
+        for entry in list_resp["data"]["results"]:
+            all_ids.add(entry["_id"])
+            for child in entry.get("children", []):
+                all_ids.add(child["_id"])
+        assert user_sub_id not in all_ids, (
+            f"user_sub_id={user_sub_id!r} still present after unsubscribe."
+        )
+
+        # The unsubscribe consumed user_sub_id; only the folder needs cleanup.
+        user_sub_id = None
+
+    finally:
+        cleanup_ids = [
+            doc_id for doc_id in (user_sub_id, folder_id) if doc_id
+        ]
+        if cleanup_ids:
+            try:
+                client.subscriptions.unsubscribe_many(cleanup_ids)
+            except Exception as exc:
+                pytest.fail(
+                    f"Cleanup of subscription/folder ids {cleanup_ids} "
+                    f"failed: {exc}. Manual cleanup required."
+                )
+
+
+# --------------------------- OPML round-trip (#31) -------------------------
+
+
+@pytest.mark.live
+def test_opml_export_then_import_round_trip(live_subscriptions_client):
+    """Export the user's subscriptions as OPML, then attempt a re-import.
+
+    Flow:
+    1. Subscribe to IEEE Spectrum under a fresh test folder so the
+       export has something deterministic to contain.
+    2. ``export_opml()`` and assert we got bytes back.
+    3. Try to parse the bytes as XML. The 2026-05-31 captures show Boox
+       sometimes returns HTML when the last import was bad — that's an
+       upstream-data problem, not an issue with our wrapper, so we
+       record the observation instead of failing the test outright.
+    4. Unsubscribe via the per-module method.
+    5. Attempt ``import_opml(<exported bytes>)``. Per the issue's
+       fragility note (#31), this endpoint returned HTTP 500 twice in
+       our HAR capture. We do not assume it works against the live API:
+       a 500 ``APIError`` is recorded but does not fail the test. Any
+       other failure mode does fail the test, so we'd notice a real
+       regression in the request shape vs. an upstream bug.
+
+    Cleanup is best-effort — the test folder and any rehydrated
+    subscription get removed via the unified bulk-delete endpoint.
+    """
+    client = live_subscriptions_client
+    folder_title = f"pytest-opml-rss-{uuid.uuid4().hex[:8]}"
+    folder_id = None
+    user_sub_id = None
+    reimported_sub_ids: list[str] = []
+
+    try:
+        # 1) Subscribe so the export is non-empty.
+        folder_resp = client.subscriptions.create_folder(
+            folder_title, FeedType.RSS
+        )
+        folder_id = folder_resp["data"]["_id"]
+
+        search_resp = client.subscriptions.search_catalog(
+            _IEEE_SPECTRUM_FEED_URL, FeedType.RSS
+        )
+        feed_id = search_resp["data"]["results"][0]["_id"]
+        sub_resp = client.subscriptions.subscribe(
+            feed_id=feed_id, parent_folder_id=folder_id
+        )
+        user_sub_id = sub_resp["data"]["_id"]
+
+        # 2) Export. Assert bytes returned.
+        opml_bytes = client.subscriptions.export_opml()
+        assert isinstance(opml_bytes, bytes), (
+            f"export_opml returned {type(opml_bytes).__name__}, expected bytes"
+        )
+        assert len(opml_bytes) > 0, "export_opml returned empty bytes"
+
+        # 3) Try to parse as XML. If the server returned HTML (the
+        # 2026-05-31 captures show this happens after a bad upload),
+        # don't fail — surface it as a warning so the test still
+        # certifies the wire shape. We use ``Element.tag`` instead of a
+        # strict OPML schema validator since OPML allows considerable
+        # variation and Boox's exact dialect isn't documented.
+        looked_like_xml = True
+        contains_feed_url = False
+        try:
+            root = ET.fromstring(opml_bytes)
+            # An OPML document's root element is <opml>; HTML round-tripped
+            # back would have a different root.
+            looked_like_xml = root.tag.lower() in {"opml"}
+            contains_feed_url = (
+                _IEEE_SPECTRUM_FEED_URL.encode("ascii") in opml_bytes
+            )
+        except ET.ParseError as exc:
+            looked_like_xml = False
+            # Record but don't fail — Boox-server-side, not our wrapper.
+            print(
+                f"NOTE: export_opml returned non-XML content "
+                f"(ET.ParseError: {exc}); first 200 bytes: "
+                f"{opml_bytes[:200]!r}"
+            )
+
+        if looked_like_xml and not contains_feed_url:
+            print(
+                f"NOTE: exported OPML didn't contain "
+                f"{_IEEE_SPECTRUM_FEED_URL!r}; first 500 bytes: "
+                f"{opml_bytes[:500]!r}"
+            )
+
+        # 4) Unsubscribe before the re-import so we can detect rehydration.
+        client.subscriptions.unsubscribe(user_sub_id)
+        original_user_sub_id = user_sub_id
+        user_sub_id = None  # consumed
+
+        # 5) Attempt re-import. May 500 (Boox upstream); record outcome.
+        try:
+            import_resp = client.subscriptions.import_opml(opml_bytes)
+        except APIError as exc:
+            # Documented fragility — accept HTTP 500 from the upstream
+            # parser, but verify it's the expected failure mode rather
+            # than silently swallowing all errors.
+            print(
+                f"NOTE: import_opml returned server error "
+                f"(status_code={exc.status_code}, "
+                f"result_code={exc.result_code}, "
+                f"message={str(exc)!r}). Per #31 fragility note, this "
+                f"is consistent with the 2026-05-31 HAR captures and "
+                f"is treated as an observation, not a test failure."
+            )
+            assert exc.status_code == 500, (
+                f"Expected upstream-parser 500 per #31 fragility note; "
+                f"got status_code={exc.status_code}. Investigate."
+            )
+        else:
+            # Happy path: import succeeded. Collect any rehydrated
+            # subscription ids so cleanup can sweep them. Don't assert
+            # exact-id equivalence — Boox may assign new user-sub _ids
+            # on re-subscribe, and per #31 scope we're "consistent with
+            # how Boox's UI handles duplicate-import", not strict
+            # idempotence.
+            assert isinstance(import_resp, dict)
+            assert import_resp.get("result_code") == 0, (
+                f"import_opml returned non-zero on 2xx: {import_resp}"
+            )
+            list_resp = client.subscriptions.list_subscriptions(FeedType.RSS)
+            for entry in list_resp["data"]["results"]:
+                for child in entry.get("children", []):
+                    if (
+                        child.get("url") == _IEEE_SPECTRUM_FEED_URL
+                        and child["_id"] != original_user_sub_id
+                    ):
+                        reimported_sub_ids.append(child["_id"])
+
+    finally:
+        cleanup_ids = [
+            doc_id for doc_id in (user_sub_id, folder_id) if doc_id
+        ]
+        cleanup_ids.extend(reimported_sub_ids)
+        if cleanup_ids:
+            try:
+                client.subscriptions.unsubscribe_many(cleanup_ids)
+            except Exception as exc:
+                pytest.fail(
+                    f"Cleanup of OPML round-trip ids {cleanup_ids} "
                     f"failed: {exc}. Manual cleanup required."
                 )
