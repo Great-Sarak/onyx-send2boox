@@ -1,4 +1,4 @@
-"""Subscriptions module — catalog ops, folders, list, recommend, detail, preview.
+"""Subscriptions module — catalog ops, folders, list, recommend, detail, preview, OPML, unsubscribe.
 
 Pattern A subobject (project decision #6, locked 2026-05-31): wired as
 ``self.subscriptions = SubscriptionsClient(self)`` on ``BooxClient``. Methods
@@ -13,22 +13,34 @@ Endpoint coverage (all HAR-confirmed):
 - ``GET  /api/1/rsses/public/recommend`` — push-boox-har-2026-05-31.json.
 - ``GET  /api/1/rsses/one/detail``       — push-boox-har-2026-05-31.json, rss-subscribe-har-2026-05-31.json.
 - ``POST /api/1/rsses/url/content``      — push-boox-har-2026-05-31.json, rss-subscribe-har-2026-05-31.json.
+- ``POST /api/1/webpage/bat/del``        — rss-subscribe-har-2026-05-31.json (#31).
+- ``POST /api/1/rsses/opml/export``      — push-boox-har-2026-05-31.json, rss-subscribe-har-2026-05-31.json (#31).
+- ``GET  /uploads/feed/export/<uuid>.opml`` — same HARs, follow-up fetch (#31).
+- ``POST /api/1/rsses/opml/import``      — rss-subscribe-har-2026-05-31.json (#31; observed 500 in capture).
 
 Catalog-only limitation: the web UI subscribe flow only succeeds for feeds
 already in Boox's curated public catalog. ``search_catalog`` returns
 ``count: 0`` for URLs not in the catalog (HAR-confirmed against
 ``https://www.atlassian.com/blog/rss``, ``https://culpaeus.peacock-walleye.ts.net:8312/opds``,
-and several others). The OPML-import workaround for custom URLs lives in
-``#31`` (next issue). This affects the user's priority #2 (custom feed
-ingestion) — callers wanting custom URLs go through OPML import, not this
-module.
+and several others). The OPML-import workaround for custom URLs lives on
+``import_opml`` below — though see its docstring for the upstream-parser
+500 caveat observed in our captures.
 
-Unsubscribe lives on the legacy flat-client surface (``Boox.unsubscribe`` /
-``Boox.delete_webpages``) until ``#31`` migrates it to a per-module method.
+Unsubscribe is exposed on this module as ``unsubscribe`` / ``unsubscribe_many``
+(#31). They hit the misleadingly-named ``POST /api/1/webpage/bat/del`` —
+per the 2026-05-31 finding, that single endpoint handles bulk-delete for
+webpages, RSS subscriptions, and OPDS subscriptions uniformly. The
+legacy flat-client aliases ``Boox.delete_webpages`` / ``Boox.unsubscribe``
+remain in place for the original top-level scripts; the per-module
+methods here are the Pattern A surface and call the same wire shape.
 """
 
 from enum import IntEnum
 from typing import Optional, Sequence
+
+import requests
+
+from boox.errors import from_response as _error_from_response
 
 
 class FeedType(IntEnum):
@@ -233,6 +245,173 @@ class SubscriptionsClient:
                 "url": url,
             },
         )
+
+    # --------------------------- unsubscribe -------------------------------
+
+    def unsubscribe(self, sub_id: str) -> dict:
+        """Unsubscribe from a single RSS or OPDS feed by user-sub record id.
+
+        Thin wrapper around :meth:`unsubscribe_many` that forwards a
+        one-element list, so single-item call sites read naturally.
+
+        ``sub_id`` is the ``_id`` of a user-sub record (the document
+        returned by :meth:`subscribe`, or any entry under
+        ``list_subscriptions().data.results[*].children``). Not the
+        catalog-feed ``_id`` and not a folder id.
+        """
+        return self.unsubscribe_many([sub_id])
+
+    def unsubscribe_many(self, sub_ids: Sequence[str]) -> Optional[dict]:
+        """Bulk-unsubscribe from RSS / OPDS feeds.
+
+        Issues ``POST /api/1/webpage/bat/del`` with ``{"ids": [...]}``.
+        Returns the parsed response envelope, e.g.
+        ``{"result_code": 0, "data": "ok", "message": "SUCCESS"}``.
+
+        Despite the ``webpage/bat/del`` name, this endpoint is the
+        unified bulk-delete for webpages **and** RSS / OPDS user-sub
+        records (and subscription folders) — per the 2026-05-31 finding,
+        Boox routes all three categories through the same wire call.
+        We expose it under two names for clarity at call sites:
+
+        - :attr:`boox.Boox.delete_webpages` / :attr:`boox.Boox.unsubscribe`
+          on the legacy flat client (kept verbatim).
+        - :meth:`unsubscribe` / :meth:`unsubscribe_many` on this Pattern A
+          module (preferred for new code).
+
+        Empty-list behavior: returns ``None`` without hitting the server.
+        The endpoint hasn't been HAR-captured with an empty ``ids``
+        array, so rather than guess its handling we short-circuit
+        client-side — saves a wasted round-trip and lets callers like
+        ``unsubscribe_many([s for s in subs if cond])`` no-op cleanly
+        when nothing matches their filter.
+
+        HAR source: ``rss-subscribe-har-2026-05-31.json`` entry
+        ``POST https://push.boox.com/api/1/webpage/bat/del`` with body
+        ``{"ids":["6a1c9ce3961d4d4b17564650"]}``, response
+        ``{"result_code":0,"data":"ok","message":"SUCCESS"}``.
+        """
+        ids = list(sub_ids)
+        if not ids:
+            return None
+        return self._c.api_call("webpage/bat/del", data={"ids": ids})
+
+    # --------------------------- export_opml -------------------------------
+
+    def export_opml(self) -> bytes:
+        """Export the user's RSS subscriptions as an OPML file, returning bytes.
+
+        Two-step flow matching the captured web UI:
+
+        1. ``POST /api/1/rsses/opml/export`` with an empty body. Response
+           envelope has ``data`` set to a relative URL like
+           ``/uploads/feed/export/<uuid>.opml`` pointing at the freshly-
+           generated OPML.
+        2. ``GET https://<cloud>/<relative_url>`` — fetch the OPML file
+           itself. The captured browser GET sends no Authorization header
+           (the UUID-in-path acts as a capability token); we mirror that.
+
+        Returns the raw file bytes. Deliberately no client-side XML /
+        OPML validation: Boox sometimes returns non-OPML content when the
+        last import was bad (the 2026-05-31 captures show HTML coming
+        back after an accidental HTML "OPML" upload). Callers that need
+        to verify validity should parse the returned bytes themselves.
+
+        HAR sources:
+        - ``push-boox-har-2026-05-31.json`` entries 241 / 242
+          (``POST .../rsses/opml/export`` followed by
+          ``GET .../uploads/feed/export/6ee90060-...opml``).
+        - ``rss-subscribe-har-2026-05-31.json`` entries 73 / 74
+          (same flow, different UUID).
+        """
+        cloud = self._c.cloud
+        token = self._c.token
+
+        # Step 1: POST /api/1/rsses/opml/export — empty body, Bearer auth.
+        # ``BooxClient.api_call`` always serializes its ``data`` arg to
+        # JSON (even ``{}`` becomes the literal string ``"{}"``); the
+        # captured request has ``Content-Length: 0``. To match the HAR
+        # shape exactly we issue the POST directly here.
+        export_url = f"https://{cloud}/api/1/rsses/opml/export"
+        headers = {}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        r = requests.post(export_url, headers=headers)
+        exc = _error_from_response(r)
+        if exc is not None:
+            raise exc
+        relative_url = r.json()["data"]
+
+        # Step 2: GET the generated OPML file. Captured browser flow does
+        # not send Authorization on this hop — the per-export UUID in the
+        # path is the only access control. We mirror that and rely on the
+        # transport-layer ``raise_for_status`` for non-2xx; the file is
+        # static content, not a result-code-envelope JSON response.
+        file_url = f"https://{cloud}{relative_url}"
+        f = requests.get(file_url)
+        f.raise_for_status()
+        return f.content
+
+    # --------------------------- import_opml -------------------------------
+
+    def import_opml(
+        self,
+        opml_bytes: bytes,
+        *,
+        filename: str = "subscriptions.opml",
+    ) -> dict:
+        """Import OPML feeds via the bulk-subscribe workaround for custom URLs.
+
+        Issues ``POST /api/1/rsses/opml/import`` as
+        ``multipart/form-data`` with a single ``file`` field carrying
+        ``opml_bytes``. Returns the parsed response envelope on success.
+
+        The captured browser request uses ``Content-Type:
+        text/x-opml+xml`` for the file part; we mirror it. ``filename``
+        is included in the multipart header to match the browser shape
+        but isn't load-bearing — Boox parses by content, not name.
+
+        **Fragility warning.** The upstream OPML parser is brittle:
+        both attempts in our 2026-05-31 capture
+        (``rss-subscribe-har-2026-05-31.json`` entries 87 / 88) returned
+        HTTP 500 with ``{"result_code": 1, "message": "Attribute without
+        value\\nLine: 6\\nColumn: 19\\nChar: s"}`` — the server was
+        trying to parse an HTML page that had been uploaded by accident
+        as if it were OPML. Real OPML may parse cleanly, but the
+        endpoint clearly has rough edges. ``api_call``'s shared
+        ``from_response`` mapping handles the 500: it raises
+        :class:`boox.errors.APIError` with the upstream parser message
+        preserved verbatim on the exception's ``response_body`` so
+        callers can surface it without re-running the request.
+
+        No ``source_type`` parameter: the captured wire shape carries
+        only the ``file`` field, with no ``sourceType`` discriminator.
+        We don't speculate about how a future HAR might encode one — if
+        Boox grows multi-type OPML support, we add the parameter then.
+
+        HAR source: ``rss-subscribe-har-2026-05-31.json`` entry
+        ``POST https://push.boox.com/api/1/rsses/opml/import`` with
+        ``multipart/form-data`` body ``name="file"; filename="...opml";
+        Content-Type: text/x-opml+xml``.
+        """
+        cloud = self._c.cloud
+        token = self._c.token
+
+        # Like ``export_opml``, bypass ``api_call``: that helper always
+        # JSON-serializes its body, but this endpoint needs a multipart
+        # upload with a typed file part. We still route the response
+        # through ``from_response`` so the 500-with-parse-error path
+        # raises the same typed ``APIError`` as the rest of the client.
+        url = f"https://{cloud}/api/1/rsses/opml/import"
+        headers = {}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        files = {"file": (filename, opml_bytes, "text/x-opml+xml")}
+        r = requests.post(url, headers=headers, files=files)
+        exc = _error_from_response(r)
+        if exc is not None:
+            raise exc
+        return r.json()
 
 
 __all__ = ["FeedType", "SubscriptionsClient"]
