@@ -226,6 +226,37 @@ def test_bulk_get_fallback_preserves_missing_entries(mock_http, unit_client):
     assert out == [{"missing": "9-doesnotexist", "id": "doc-a"}]
 
 
+def test_bulk_get_fallback_url_encodes_hash_in_doc_id(mock_http, unit_client):
+    """READER_LIBRARY doc_ids are ``<user>#<docid>`` — the ``#`` must be
+    percent-encoded as ``%23`` in the per-doc fallback path, otherwise
+    HTTP fragment semantics drop the tail and the server receives a GET
+    for ``<user>`` only. Regression for #68.
+    """
+    mock_http.post(
+        f"{TEST_NEOCLOUD_BASE}/_bulk_get",
+        json={"error": "Not Acceptable", "reason": "Response is multipart"},
+        status=406,
+    )
+    encoded_id = "user-uid#book-uuid"
+    mock_http.get(
+        f"{TEST_NEOCLOUD_BASE}/user-uid%23book-uuid",
+        json=[{"ok": {"_id": encoded_id, "_rev": "1-aaa", "value": 1}}],
+        status=200,
+    )
+
+    out = unit_client.sync.bulk_get([{"id": encoded_id, "rev": "1-aaa"}])
+
+    assert out == [{"ok": {"_id": encoded_id, "_rev": "1-aaa", "value": 1}}]
+    # The actual fired URL (after responses unescapes for matching) must
+    # contain the encoded ``%23`` form. responses' call.request.url shows
+    # the literal URL the requests-library serialized.
+    fallback_url = mock_http.calls[1].request.url
+    assert "%23" in fallback_url, f"Expected %23-encoded #, got {fallback_url!r}"
+    assert "#" not in fallback_url.split("?", 1)[0], (
+        f"Raw # leaked into path: {fallback_url!r}"
+    )
+
+
 def test_bulk_get_empty_input_short_circuits(unit_client):
     """No HTTP fired when called with an empty doc_revs list."""
     assert unit_client.sync.bulk_get([]) == []

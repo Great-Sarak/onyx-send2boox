@@ -84,10 +84,12 @@ __all__ = [
     "BookBackend",
     "ReaderNote",
     "LibraryOperation",
+    "Bookmark",
     "LibraryRecord",
     "READER_LIBRARY_SUFFIX",
     "pull_library",
     "iter_books",
+    "iter_bookmarks_for_book",
     "get_book",
     "iter_reader_notes_for_book",
 ]
@@ -285,7 +287,14 @@ class ReaderNote:
 
 @dataclass
 class LibraryOperation:
-    """A READER_LIBRARY doc with ``recordType: 1`` — sync bookkeeping."""
+    """A READER_LIBRARY doc with ``recordType: 1`` — sync bookkeeping.
+
+    The live channel surfaces these as per-page progress records
+    (``commitType: 4``, ``commitStatus: 1``) — one per book the
+    server has seen progress for. Older HAR captures from NOTE_TREE
+    showed a leaner shape with only ``commitType``/``commitStatus``
+    set; both shapes coerce to this class.
+    """
 
     id: str
     rev: Optional[str]
@@ -296,23 +305,53 @@ class LibraryOperation:
     raw: Mapping[str, Any] = field(repr=False)
 
 
-LibraryRecord = Union[Book, ReaderNote, LibraryOperation]
+@dataclass
+class Bookmark:
+    """A READER_LIBRARY doc representing a single highlighted excerpt.
+
+    Distinguished from :class:`ReaderNote` by the presence of a
+    ``quote`` field — the highlighted text. Bookmarks reference their
+    parent book by :attr:`document_id` and carry positional metadata
+    (page number, byte/page-offset position, and an ``xpath`` for
+    EPUB-style reflowable formats).
+    """
+
+    id: str
+    rev: Optional[str]
+    document_id: Optional[str]
+    quote: Optional[str]
+    page_number: Optional[int]
+    position: Optional[Any]
+    position_type: Optional[Any]
+    xpath: Optional[str]
+    title: Optional[str]
+    created_at: Optional[int]
+    updated_at: Optional[int]
+    raw: Mapping[str, Any] = field(repr=False)
+
+
+LibraryRecord = Union[Book, ReaderNote, LibraryOperation, Bookmark]
 
 
 def _coerce(body: Mapping[str, Any]) -> LibraryRecord:
     """Dispatch a doc body to the right typed shape.
 
-    Discriminator order matters:
+    Discriminator order matters — the channel is heterogeneous:
 
-    1. ``recordType == 1`` → :class:`LibraryOperation`. Op records in
-       the captured HARs don't carry ``UUID`` or ``documentId``, so
-       checking ``recordType`` first avoids ambiguity.
-    2. ``documentId`` present → :class:`ReaderNote`. Books in the HARs
-       never carry ``documentId``; reader-notes always do.
-    3. Otherwise → :class:`Book`. The cheapest assumption for the
-       residual case; if Boox ever ships a new doc kind the field-set
-       will look weird in ``raw`` and we'll catch it via the live
-       smoke.
+    1. ``recordType == 1`` → :class:`LibraryOperation`. Progress and
+       commit-only sync records (``commitType==4`` for progress, other
+       commit types for note-bookkeeping) — these are the only docs
+       on this channel that explicitly carry ``recordType: 1``.
+    2. ``"quote" in body`` → :class:`Bookmark`. Highlighted excerpts.
+       Must be checked before the ``documentId`` branch because
+       bookmarks also carry ``documentId`` (their parent book) and
+       would otherwise mis-coerce to :class:`ReaderNote`.
+    3. ``documentId`` present → :class:`ReaderNote`. Annotation /
+       highlight containers (``debugInfo`` starts with
+       ``SyncReaderNoteDocumentModel{...}`` on the live wire).
+    4. Otherwise → :class:`Book`. Book metadata bodies carry no
+       ``recordType``, no ``documentId``, no ``quote`` — instead they
+       have ``name`` + ``nativeAbsolutePath`` + ``progress`` etc.
     """
     doc_id = body.get("_id") or body.get("uniqueId") or ""
     rev = body.get("_rev")
@@ -328,11 +367,27 @@ def _coerce(body: Mapping[str, Any]) -> LibraryRecord:
             raw=body,
         )
 
+    if "quote" in body:
+        return Bookmark(
+            id=doc_id,
+            rev=rev,
+            document_id=body.get("documentId"),
+            quote=body.get("quote"),
+            page_number=body.get("pageNumber"),
+            position=body.get("position"),
+            position_type=body.get("positionType"),
+            xpath=body.get("xpath"),
+            title=body.get("title"),
+            created_at=body.get("createdAt"),
+            updated_at=body.get("updatedAt"),
+            raw=body,
+        )
+
     if "documentId" in body:
         return ReaderNote(
             id=doc_id,
             rev=rev,
-            uuid=body.get("UUID"),
+            uuid=body.get("uUID") or body.get("UUID"),
             document_id=body.get("documentId"),
             title=body.get("title"),
             current_shape_type=body.get("currentShapeType"),
@@ -348,7 +403,7 @@ def _coerce(body: Mapping[str, Any]) -> LibraryRecord:
     return Book(
         id=doc_id,
         rev=rev,
-        uuid=body.get("UUID"),
+        uuid=body.get("uUID") or body.get("UUID"),
         name=body.get("name"),
         last_access=body.get("lastAccess"),
         last_modified=body.get("lastModified"),
@@ -375,6 +430,7 @@ def _from_doc(body: Mapping[str, Any]) -> LibraryRecord:
 Book.from_doc = staticmethod(_from_doc)  # type: ignore[assignment]
 ReaderNote.from_doc = staticmethod(_from_doc)  # type: ignore[assignment]
 LibraryOperation.from_doc = staticmethod(_from_doc)  # type: ignore[assignment]
+Bookmark.from_doc = staticmethod(_from_doc)  # type: ignore[assignment]
 
 
 # --------------------------- channel name ----------------------------------
@@ -540,4 +596,20 @@ def iter_reader_notes_for_book(
     for row in store.iter_channel(_LOCAL_CHANNEL):
         rec = _coerce(row["body"])
         if isinstance(rec, ReaderNote) and rec.document_id == book_id:
+            yield rec
+
+
+def iter_bookmarks_for_book(
+    store: LocalStore, book_id: str
+) -> Iterator[Bookmark]:
+    """Yield :class:`Bookmark` records whose ``documentId`` matches.
+
+    Bookmarks reference their parent book by ``documentId``, same
+    shape as :class:`ReaderNote`. The discriminator at coerce time
+    is the presence of a ``quote`` field — this iterator filters by
+    type after coercion.
+    """
+    for row in store.iter_channel(_LOCAL_CHANNEL):
+        rec = _coerce(row["body"])
+        if isinstance(rec, Bookmark) and rec.document_id == book_id:
             yield rec

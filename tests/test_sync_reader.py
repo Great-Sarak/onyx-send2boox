@@ -25,16 +25,18 @@ import boox
 from boox.sync import (
     Book,
     BookBackend,
+    Bookmark,
     ChangesResult,
     LibraryOperation,
     LocalStore,
     ReaderNote,
     get_book,
     iter_books,
+    iter_bookmarks_for_book,
     iter_reader_notes_for_book,
     pull_library,
 )
-from boox.sync.reader import READER_LIBRARY_SUFFIX, _LOCAL_CHANNEL
+from boox.sync.reader import READER_LIBRARY_SUFFIX, _LOCAL_CHANNEL, _coerce
 
 
 # --------------------------- helpers ---------------------------------------
@@ -172,6 +174,27 @@ def _op_body(doc_id="op1", rev="1-ooo", target="user-uid-42#book1"):
         "commitType": 1,
         "commitStatus": 1,
         "documentUniqueId": target,
+    }
+
+
+def _bookmark_body(
+    doc_id="user-uid-42#bookmark1",
+    rev="1-bbb",
+    document_id="user-uid-42#book1",
+    quote="The cat sat on the mat.",
+):
+    return {
+        "_id": doc_id,
+        "_rev": rev,
+        "documentId": document_id,
+        "quote": quote,
+        "pageNumber": 42,
+        "position": "page-ref-12",
+        "positionType": 0,
+        "xpath": "/html/body/p[1]",
+        "title": "Chapter 3",
+        "createdAt": 1740358887604,
+        "updatedAt": 1740367277657,
     }
 
 
@@ -373,6 +396,36 @@ def test_book_from_doc_dispatch():
     assert isinstance(Book.from_doc(_book_body()), Book)
     assert isinstance(Book.from_doc(_reader_note_body()), ReaderNote)
     assert isinstance(Book.from_doc(_op_body()), LibraryOperation)
+    assert isinstance(Book.from_doc(_bookmark_body()), Bookmark)
+
+
+def test_bookmark_dispatched_before_reader_note():
+    """Bookmarks carry ``documentId`` (parent book ref) just like
+    reader-notes, so the ``quote`` discriminator must fire first.
+
+    Regression for #68: prior `_coerce` checked ``documentId`` first
+    and mis-tagged every bookmark as :class:`ReaderNote`.
+    """
+    body = _bookmark_body()
+    assert "documentId" in body and "quote" in body  # both present
+    rec = _coerce(body)
+    assert isinstance(rec, Bookmark)
+    assert rec.document_id == "user-uid-42#book1"
+    assert rec.quote == "The cat sat on the mat."
+    assert rec.page_number == 42
+    assert rec.xpath == "/html/body/p[1]"
+
+
+def test_book_uses_uUID_when_present():
+    """Live wire-shape sends ``uUID`` (lowercase u + UU + ID); fixture
+    test bodies historically used the uppercase ``UUID``. `_coerce`
+    accepts both.
+    """
+    body = _book_body()
+    body["uUID"] = "wire-shape-uuid"
+    book = Book.from_doc(body)
+    assert isinstance(book, Book)
+    assert book.uuid == "wire-shape-uuid"
 
 
 def test_book_top_level_fields_parsed():
