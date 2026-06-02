@@ -28,6 +28,7 @@ from boox.files import FilesClient
 from boox.pushread import PushRead
 from boox.screensavers import ScreensaversClient
 from boox.subscriptions import SubscriptionsClient
+from boox.sync import SyncClient
 
 
 def read_config(filename="config.ini"):
@@ -54,12 +55,14 @@ class BooxClient:
         # functional module surfaces as a subobject on the client. ``auth``
         # is the first; ``pushread`` follows (#29); ``subscriptions`` lands
         # in Phase 2 (#30); ``files`` lands in Phase 2 (#32);
-        # ``screensavers`` lands in Phase 2 (#33).
+        # ``screensavers`` lands in Phase 2 (#33); ``sync`` lands in
+        # Phase 4 (#34) carrying the Couchbase Sync Gateway primitives.
         self.auth = Auth(self)
         self.pushread = PushRead(self)
         self.subscriptions = SubscriptionsClient(self)
         self.files = FilesClient(self)
         self.screensavers = ScreensaversClient(self)
+        self.sync = SyncClient(self)
 
         # Cached SyncGatewaySession (fallback only — Phase 1 #27 derives
         # this at runtime from the Bearer JWT). Read here so it's available
