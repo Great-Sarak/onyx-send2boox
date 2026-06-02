@@ -78,6 +78,7 @@ from __future__ import annotations
 
 import json
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence
+from urllib.parse import quote
 
 import requests
 
@@ -346,7 +347,12 @@ class SyncClient:
                 "latest": "true",
                 "open_revs": json.dumps([rev]),
             }
-            r = self._request("GET", f"/{doc_id}", params=params)
+            # READER_LIBRARY doc_ids are ``<user_uid>#<doc_uuid>``. The ``#`` is
+            # a URL fragment delimiter — if we don't percent-encode it the
+            # server receives ``GET /neocloud/<user_uid>`` with the rev tail
+            # silently dropped, returns ``[{"missing": "<rev>"}]``, and the
+            # caller loses the doc. The PouchDB web client sends ``%23``.
+            r = self._request("GET", f"/{quote(doc_id, safe='')}", params=params)
             entries = r.json()
             for entry in entries:
                 if "missing" in entry and "id" not in entry:

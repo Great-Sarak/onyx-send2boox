@@ -19,30 +19,37 @@ Channel name
 ``<user_uid>-READER_LIBRARY`` — assembled inside :func:`pull_library`
 from ``client.userid``, same pattern as #36.
 
-Doc kinds (HAR-confirmed against the 2026-05-31 library captures)
------------------------------------------------------------------
+Doc kinds (HAR-confirmed against the 2026-06-02 fresh-sync library capture)
+---------------------------------------------------------------------------
 
-READER_LIBRARY carries three discriminable kinds, dispatched by
+READER_LIBRARY carries four discriminable kinds, dispatched by
 :meth:`Book.from_doc`:
 
-- ``recordType: 1`` → :class:`LibraryOperation`. Sync bookkeeping
-  (delete / share ops against a book). The discriminator matches the
-  NOTE_TREE pattern exactly.
-- A ``documentId`` field referring back to a book ``_id`` (and no
-  ``recordType``) → :class:`ReaderNote`. Annotation / highlight /
-  handwritten-note container. The active-shape schema lives inside
-  ``commitInfo`` as a JSON-encoded string — lazy-decoded the same way
-  ``extraAttributes`` is on books.
-- Everything else carrying ``UUID`` + ``extraAttributes`` →
-  :class:`Book`. Top-level metadata (name, progress, reading status,
-  …) plus a nested ``backend`` payload parsed lazily from
-  ``extraAttributes``.
+- ``recordType: 1`` → :class:`BookProgress`. Per-book reading-progress
+  sync record (``commitType: 4``, ``commitStatus: 1``) — references
+  the parent book via ``documentUniqueId`` and the current page via
+  ``pageUniqueId`` / ``recordFilePath`` / ``recordFileExtension``.
+  One per book the server has seen progress for; coexists with the
+  book metadata record (book bodies do NOT carry ``recordType``).
+- A ``quote`` field (carrying highlighted text) → :class:`Bookmark`.
+  Bookmarks reference their parent book by ``documentId`` and carry
+  page-position metadata (``pageNumber``, ``position``, ``xpath``).
+  Must dispatch before the ``documentId`` check because bookmarks
+  also carry ``documentId``.
+- A ``documentId`` field (and no ``quote``) → :class:`ReaderNote`.
+  Annotation / highlight / handwritten-note container; on the live
+  wire ``debugInfo`` starts with ``SyncReaderNoteDocumentModel{...}``.
+  The active-shape schema lives inside ``commitInfo`` as a
+  JSON-encoded string — lazy-decoded the same way ``extraAttributes``
+  is on books.
+- Everything else (carrying ``name`` + ``nativeAbsolutePath`` /
+  ``idString`` / ``extraAttributes``) → :class:`Book`. Top-level
+  metadata (name, progress, reading status, …) plus a nested
+  ``backend`` payload parsed lazily from ``extraAttributes``.
 
-Why ``documentId`` and not ``document: false``? The 2026-05-31 HARs
-show neither books nor reader-notes carry a ``document`` flag (that's a
-NOTE_TREE-ism). ``documentId`` is the one field unique to reader-notes
-and absent from book docs in every captured sample, so it's the
-load-bearing discriminator here.
+Book bodies on the live wire do NOT carry ``recordType`` — only the
+progress records do. The ``recordType == 1`` check is therefore
+specific to :class:`BookProgress` on this channel.
 
 extraAttributes / commitInfo — lazy decode
 ------------------------------------------
@@ -82,14 +89,17 @@ from boox.sync.store import LocalStore
 __all__ = [
     "Book",
     "BookBackend",
-    "ReaderNote",
-    "LibraryOperation",
+    "BookProgress",
+    "Bookmark",
     "LibraryRecord",
     "READER_LIBRARY_SUFFIX",
-    "pull_library",
-    "iter_books",
+    "ReaderNote",
     "get_book",
+    "iter_book_progress_for_book",
+    "iter_books",
+    "iter_bookmarks_for_book",
     "iter_reader_notes_for_book",
+    "pull_library",
 ]
 
 
@@ -284,47 +294,126 @@ class ReaderNote:
 
 
 @dataclass
-class LibraryOperation:
-    """A READER_LIBRARY doc with ``recordType: 1`` — sync bookkeeping."""
+class BookProgress:
+    """A READER_LIBRARY doc marking per-book reading-activity sync.
+
+    Live wire shape: ``recordType: 1``, ``commitType: 4``,
+    ``commitStatus: 1``. References the parent book via
+    :attr:`document_unique_id`. One per book the server has seen
+    reading activity for.
+
+    The actual progress *value* (``"15/115"`` etc.) is on :class:`Book`,
+    not here. These records are sync markers — they fire when reading
+    activity changes — and the rest of the channel state catches up.
+
+    Per-page scribble fields — :attr:`page_unique_id`,
+    :attr:`record_file_path`, :attr:`record_file_extension`,
+    :attr:`commit_id` — are present in the wire shape but observed
+    null on a test account with no handwritten annotations
+    (2026-06-02 HAR: 51/71 records carry these keys with `null`
+    values, 20/71 omit them entirely, 0/71 carry non-null values).
+    Expect them to populate on accounts where the user has scribbled
+    on per-page note layers.
+
+    Distinct from :class:`Book` (book metadata: name, file path,
+    hash, etc.) and :class:`ReaderNote` / :class:`Bookmark`
+    (annotation containers). On the live wire, books and progress
+    records share the channel and discriminate purely on
+    ``recordType``: progress carries it, books don't.
+    """
 
     id: str
     rev: Optional[str]
     record_type: int
     commit_type: Optional[int]
     commit_status: Optional[int]
+    commit_id: Optional[str]
     document_unique_id: Optional[str]
+    page_unique_id: Optional[str]
+    record_file_path: Optional[str]
+    record_file_extension: Optional[str]
     raw: Mapping[str, Any] = field(repr=False)
 
 
-LibraryRecord = Union[Book, ReaderNote, LibraryOperation]
+@dataclass
+class Bookmark:
+    """A READER_LIBRARY doc representing a single highlighted excerpt.
+
+    Distinguished from :class:`ReaderNote` by the presence of a
+    ``quote`` field — the highlighted text. Bookmarks reference their
+    parent book by :attr:`document_id` and carry positional metadata
+    (page number, byte/page-offset position, and an ``xpath`` for
+    EPUB-style reflowable formats).
+    """
+
+    id: str
+    rev: Optional[str]
+    document_id: Optional[str]
+    quote: Optional[str]
+    page_number: Optional[int]
+    position: Optional[Any]
+    position_type: Optional[Any]
+    xpath: Optional[str]
+    title: Optional[str]
+    created_at: Optional[int]
+    updated_at: Optional[int]
+    raw: Mapping[str, Any] = field(repr=False)
+
+
+LibraryRecord = Union[Book, ReaderNote, BookProgress, Bookmark]
 
 
 def _coerce(body: Mapping[str, Any]) -> LibraryRecord:
     """Dispatch a doc body to the right typed shape.
 
-    Discriminator order matters:
+    Discriminator order matters — the channel is heterogeneous:
 
-    1. ``recordType == 1`` → :class:`LibraryOperation`. Op records in
-       the captured HARs don't carry ``UUID`` or ``documentId``, so
-       checking ``recordType`` first avoids ambiguity.
-    2. ``documentId`` present → :class:`ReaderNote`. Books in the HARs
-       never carry ``documentId``; reader-notes always do.
-    3. Otherwise → :class:`Book`. The cheapest assumption for the
-       residual case; if Boox ever ships a new doc kind the field-set
-       will look weird in ``raw`` and we'll catch it via the live
-       smoke.
+    1. ``recordType == 1`` → :class:`BookProgress`. Per-book reading
+       progress (``commitType==4``). These are the only docs on
+       READER_LIBRARY that explicitly carry ``recordType: 1`` —
+       book metadata records do NOT.
+    2. ``"quote" in body`` → :class:`Bookmark`. Highlighted excerpts.
+       Must be checked before the ``documentId`` branch because
+       bookmarks also carry ``documentId`` (their parent book) and
+       would otherwise mis-coerce to :class:`ReaderNote`.
+    3. ``documentId`` present → :class:`ReaderNote`. Annotation /
+       highlight containers (``debugInfo`` starts with
+       ``SyncReaderNoteDocumentModel{...}`` on the live wire).
+    4. Otherwise → :class:`Book`. Book metadata bodies carry no
+       ``recordType``, no ``documentId``, no ``quote`` — instead they
+       have ``name`` + ``nativeAbsolutePath`` + ``progress`` etc.
     """
     doc_id = body.get("_id") or body.get("uniqueId") or ""
     rev = body.get("_rev")
 
     if body.get("recordType") == 1:
-        return LibraryOperation(
+        return BookProgress(
             id=doc_id,
             rev=rev,
             record_type=1,
             commit_type=body.get("commitType"),
             commit_status=body.get("commitStatus"),
+            commit_id=body.get("commitId"),
             document_unique_id=body.get("documentUniqueId"),
+            page_unique_id=body.get("pageUniqueId"),
+            record_file_path=body.get("recordFilePath"),
+            record_file_extension=body.get("recordFileExtension"),
+            raw=body,
+        )
+
+    if "quote" in body:
+        return Bookmark(
+            id=doc_id,
+            rev=rev,
+            document_id=body.get("documentId"),
+            quote=body.get("quote"),
+            page_number=body.get("pageNumber"),
+            position=body.get("position"),
+            position_type=body.get("positionType"),
+            xpath=body.get("xpath"),
+            title=body.get("title"),
+            created_at=body.get("createdAt"),
+            updated_at=body.get("updatedAt"),
             raw=body,
         )
 
@@ -332,7 +421,7 @@ def _coerce(body: Mapping[str, Any]) -> LibraryRecord:
         return ReaderNote(
             id=doc_id,
             rev=rev,
-            uuid=body.get("UUID"),
+            uuid=body.get("uUID") or body.get("UUID"),
             document_id=body.get("documentId"),
             title=body.get("title"),
             current_shape_type=body.get("currentShapeType"),
@@ -348,7 +437,7 @@ def _coerce(body: Mapping[str, Any]) -> LibraryRecord:
     return Book(
         id=doc_id,
         rev=rev,
-        uuid=body.get("UUID"),
+        uuid=body.get("uUID") or body.get("UUID"),
         name=body.get("name"),
         last_access=body.get("lastAccess"),
         last_modified=body.get("lastModified"),
@@ -374,7 +463,8 @@ def _from_doc(body: Mapping[str, Any]) -> LibraryRecord:
 
 Book.from_doc = staticmethod(_from_doc)  # type: ignore[assignment]
 ReaderNote.from_doc = staticmethod(_from_doc)  # type: ignore[assignment]
-LibraryOperation.from_doc = staticmethod(_from_doc)  # type: ignore[assignment]
+BookProgress.from_doc = staticmethod(_from_doc)  # type: ignore[assignment]
+Bookmark.from_doc = staticmethod(_from_doc)  # type: ignore[assignment]
 
 
 # --------------------------- channel name ----------------------------------
@@ -540,4 +630,38 @@ def iter_reader_notes_for_book(
     for row in store.iter_channel(_LOCAL_CHANNEL):
         rec = _coerce(row["body"])
         if isinstance(rec, ReaderNote) and rec.document_id == book_id:
+            yield rec
+
+
+def iter_bookmarks_for_book(
+    store: LocalStore, book_id: str
+) -> Iterator[Bookmark]:
+    """Yield :class:`Bookmark` records whose ``documentId`` matches.
+
+    Bookmarks reference their parent book by ``documentId``, same
+    shape as :class:`ReaderNote`. The discriminator at coerce time
+    is the presence of a ``quote`` field — this iterator filters by
+    type after coercion.
+    """
+    for row in store.iter_channel(_LOCAL_CHANNEL):
+        rec = _coerce(row["body"])
+        if isinstance(rec, Bookmark) and rec.document_id == book_id:
+            yield rec
+
+
+def iter_book_progress_for_book(
+    store: LocalStore, book_id: str
+) -> Iterator[BookProgress]:
+    """Yield :class:`BookProgress` records whose ``documentUniqueId`` matches.
+
+    Progress records reference their parent book via
+    ``documentUniqueId`` (which is the bare 32-char hex ``UUID`` of
+    the book, NOT the ``<user>#<uuid>`` ``_id`` shape — book_id here
+    should be the UUID, not the prefixed _id).
+
+    The store typically holds at most one progress record per book.
+    """
+    for row in store.iter_channel(_LOCAL_CHANNEL):
+        rec = _coerce(row["body"])
+        if isinstance(rec, BookProgress) and rec.document_unique_id == book_id:
             yield rec
