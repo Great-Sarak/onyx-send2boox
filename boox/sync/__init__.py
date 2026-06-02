@@ -32,6 +32,11 @@ from boox.sync.calibre_bridge import (
     match_books,
     sync_reading_state,
 )
+from boox.sync.calibre_md5_populator import (
+    PopulateError,
+    PopulateResult,
+    populate_md5_identifiers,
+)
 from boox.sync.notes import (
     Note,
     NoteFolder,
@@ -68,8 +73,11 @@ __all__ = [
     "CalibreClient",
     "ChangesResult",
     "MatchResult",
+    "PopulateError",
+    "PopulateResult",
     "SyncSummary",
     "match_books",
+    "populate_md5_identifiers",
     "sync_reading_state",
     "LibraryRecord",
     "LocalStore",
