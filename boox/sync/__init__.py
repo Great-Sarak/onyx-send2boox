@@ -22,12 +22,28 @@ Modules
 from __future__ import annotations
 
 from boox.sync._protocol import ChangesResult, SyncClient, SyncProtocolError
+from boox.sync.notes import (
+    Note,
+    NoteFolder,
+    NoteOperation,
+    NoteRecord,
+    get_note,
+    iter_notes,
+    pull_notes,
+)
 from boox.sync.store import LocalStore, LocalStoreError
 
 __all__ = [
     "ChangesResult",
     "LocalStore",
     "LocalStoreError",
+    "Note",
+    "NoteFolder",
+    "NoteOperation",
+    "NoteRecord",
     "SyncClient",
     "SyncProtocolError",
+    "get_note",
+    "iter_notes",
+    "pull_notes",
 ]
