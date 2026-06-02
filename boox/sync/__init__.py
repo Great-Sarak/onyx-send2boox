@@ -31,19 +31,39 @@ from boox.sync.notes import (
     iter_notes,
     pull_notes,
 )
+from boox.sync.reader import (
+    Book,
+    BookBackend,
+    LibraryOperation,
+    LibraryRecord,
+    ReaderNote,
+    get_book,
+    iter_books,
+    iter_reader_notes_for_book,
+    pull_library,
+)
 from boox.sync.store import LocalStore, LocalStoreError
 
 __all__ = [
+    "Book",
+    "BookBackend",
     "ChangesResult",
+    "LibraryOperation",
+    "LibraryRecord",
     "LocalStore",
     "LocalStoreError",
     "Note",
     "NoteFolder",
     "NoteOperation",
     "NoteRecord",
+    "ReaderNote",
     "SyncClient",
     "SyncProtocolError",
+    "get_book",
     "get_note",
+    "iter_books",
     "iter_notes",
+    "iter_reader_notes_for_book",
+    "pull_library",
     "pull_notes",
 ]
