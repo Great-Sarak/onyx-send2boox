@@ -25,12 +25,13 @@ import boox
 from boox.sync import (
     Book,
     BookBackend,
+    BookProgress,
     Bookmark,
     ChangesResult,
-    LibraryOperation,
     LocalStore,
     ReaderNote,
     get_book,
+    iter_book_progress_for_book,
     iter_books,
     iter_bookmarks_for_book,
     iter_reader_notes_for_book,
@@ -167,6 +168,12 @@ def _reader_note_body(
 
 
 def _op_body(doc_id="op1", rev="1-ooo", target="user-uid-42#book1"):
+    """Minimal progress-record body — historical NOTE_TREE-shape fixture.
+
+    Lacks the live READER_LIBRARY progress fields (``pageUniqueId``,
+    ``recordFilePath``, etc.). Kept around for existing tests that
+    just need a recordType:1 body distinct from books / notes.
+    """
     return {
         "_id": doc_id,
         "_rev": rev,
@@ -174,6 +181,35 @@ def _op_body(doc_id="op1", rev="1-ooo", target="user-uid-42#book1"):
         "commitType": 1,
         "commitStatus": 1,
         "documentUniqueId": target,
+    }
+
+
+def _progress_body(
+    doc_id="progress-doc-1",
+    rev="1-ppp",
+    book_uuid="bare-book-uuid",
+    commit_id="commit-abc",
+    page_uuid="page-xyz",
+):
+    """Live READER_LIBRARY progress-record body shape.
+
+    Matches the 2026-06-02 HAR-captured wire shape: ``commitType: 4``,
+    ``commitStatus: 1``, plus ``pageUniqueId`` / ``recordFilePath`` /
+    ``recordFileExtension`` for the per-page state.
+    """
+    return {
+        "_id": doc_id,
+        "_rev": rev,
+        "recordType": 1,
+        "commitType": 4,
+        "commitStatus": 1,
+        "commitId": commit_id,
+        "documentUniqueId": book_uuid,
+        "pageUniqueId": page_uuid,
+        "recordFilePath": "/some/scribble/path",
+        "recordFileExtension": "json",
+        "createdAt": 1740358887604,
+        "updatedAt": 1740367277657,
     }
 
 
@@ -395,8 +431,22 @@ def test_missing_bulk_get_entry_skipped(store):
 def test_book_from_doc_dispatch():
     assert isinstance(Book.from_doc(_book_body()), Book)
     assert isinstance(Book.from_doc(_reader_note_body()), ReaderNote)
-    assert isinstance(Book.from_doc(_op_body()), LibraryOperation)
+    assert isinstance(Book.from_doc(_op_body()), BookProgress)
+    assert isinstance(Book.from_doc(_progress_body()), BookProgress)
     assert isinstance(Book.from_doc(_bookmark_body()), Bookmark)
+
+
+def test_book_progress_typed_fields_parsed():
+    """Live progress-record fields surface on the dataclass."""
+    prog = Book.from_doc(_progress_body())
+    assert isinstance(prog, BookProgress)
+    assert prog.commit_type == 4
+    assert prog.commit_status == 1
+    assert prog.commit_id == "commit-abc"
+    assert prog.document_unique_id == "bare-book-uuid"
+    assert prog.page_unique_id == "page-xyz"
+    assert prog.record_file_path == "/some/scribble/path"
+    assert prog.record_file_extension == "json"
 
 
 def test_bookmark_dispatched_before_reader_note():
