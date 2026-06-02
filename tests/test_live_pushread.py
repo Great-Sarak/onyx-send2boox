@@ -72,10 +72,15 @@ def test_pushread_round_trip(live_pushread_client):
         # 2) Confirm it appears in the listing.
         list_resp = live_pushread_client.pushread.list_webpages(limit=50)
         assert list_resp["result_code"] == 0
-        ids_present = {e["_id"] for e in list_resp["list"]}
+        # ``list_webpages`` returns the standard ``{result_code, data: {
+        # count, results: [...] }}`` envelope; items live under
+        # ``data.results``, NOT at a top-level ``list`` key. Each item
+        # carries ``_id`` at the top level (mirrors ``cbMsg.id``).
+        items = list_resp.get("data", {}).get("results", [])
+        ids_present = {e["_id"] for e in items}
         assert added_id in ids_present, (
             f"Just-pushed _id={added_id!r} not in listing of "
-            f"{len(list_resp['list'])} entries."
+            f"{len(items)} entries."
         )
 
         # 3) Delete.
@@ -90,7 +95,8 @@ def test_pushread_round_trip(live_pushread_client):
         # 4) Confirm it's gone.
         list_after = live_pushread_client.pushread.list_webpages(limit=50)
         assert list_after["result_code"] == 0
-        ids_after = {e["_id"] for e in list_after["list"]}
+        items_after = list_after.get("data", {}).get("results", [])
+        ids_after = {e["_id"] for e in items_after}
         assert deleted_id not in ids_after, (
             f"_id={deleted_id!r} still listed after delete."
         )
