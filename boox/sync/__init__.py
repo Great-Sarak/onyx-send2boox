@@ -22,6 +22,16 @@ Modules
 from __future__ import annotations
 
 from boox.sync._protocol import ChangesResult, SyncClient, SyncProtocolError
+from boox.sync.calibre_bridge import (
+    BookMatch,
+    CalibreBook,
+    CalibreBridgeError,
+    CalibreClient,
+    MatchResult,
+    SyncSummary,
+    match_books,
+    sync_reading_state,
+)
 from boox.sync.notes import (
     Note,
     NoteFolder,
@@ -47,7 +57,15 @@ from boox.sync.store import LocalStore, LocalStoreError
 __all__ = [
     "Book",
     "BookBackend",
+    "BookMatch",
+    "CalibreBook",
+    "CalibreBridgeError",
+    "CalibreClient",
     "ChangesResult",
+    "MatchResult",
+    "SyncSummary",
+    "match_books",
+    "sync_reading_state",
     "LibraryOperation",
     "LibraryRecord",
     "LocalStore",
